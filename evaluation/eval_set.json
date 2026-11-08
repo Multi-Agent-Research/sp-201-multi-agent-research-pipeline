@@ -1,0 +1,653 @@
+{
+  "name": "SP-201 evaluation set",
+  "version": "2026-11-07",
+  "purpose": "Twenty complex research questions used to measure accuracy and citation reliability (SRS 1.2).",
+  "scoring": {
+    "accuracy": "For each question, the share of expected_facts the final report states correctly, in any wording. A report that states anything listed in must_not_claim, or contradicts an expected fact, is marked for that error.",
+    "citation_reliability": "The share of the report's claims whose cited evidence supports them: the Fact-Checker's support score (SRS 3.6.7), checked against the stored passages."
+  },
+  "types": {
+    "technical": "AI research topics with answers on arXiv and Wikipedia. Exercises decomposition and source selection (SRS 3.1.2, 3.1.3) and retrieval from more than one source (3.2.2).",
+    "science_history": "Multi-part factual questions answered mainly from Wikipedia (SRS 3.1.2, 3.2.2).",
+    "comparison": "Two related topics; the plan needs a sub-question for each side (SRS 3.1.2, 3.1.6).",
+    "false_premise": "The question assumes something false. A correct report corrects the premise instead of explaining it, and a claim repeating the premise should not pass the Fact-Checker (SRS 3.5.2, 3.5.3, 3.6.4).",
+    "thin_or_numeric": "Evidence that only one source type holds, or exact figures that are easy to state wrongly (SRS 3.2.2, 3.2.3, 3.5.3)."
+  },
+  "questions": [
+    {
+      "id": "Q01",
+      "type": "technical",
+      "question": "How does self-attention in the Transformer architecture work, and why did Transformers replace recurrent networks for tasks like machine translation?",
+      "expected_sources": [
+        "arxiv",
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The Transformer was introduced in the 2017 paper \"Attention Is All You Need\" and relies on attention alone, with no recurrence or convolutions.",
+          "source": "https://arxiv.org/abs/1706.03762",
+          "quote": "based solely on attention mechanisms, dispensing with recurrence and convolutions entirely"
+        },
+        {
+          "fact": "Attention weights are divided by the square root of the key dimension before the softmax.",
+          "source": "https://en.wikipedia.org/wiki/Transformer_(deep_learning)",
+          "quote": "The attention weights are divided by the square root of the dimension of the key vectors"
+        },
+        {
+          "fact": "Transformers use multi-head attention, several attention heads working in parallel.",
+          "source": "https://en.wikipedia.org/wiki/Transformer_(deep_learning)",
+          "quote": "based on the multi-head attention mechanism"
+        },
+        {
+          "fact": "RNNs process tokens one at a time and cannot work in parallel across a sequence.",
+          "source": "https://en.wikipedia.org/wiki/Transformer_(deep_learning)",
+          "quote": "RNNs operate one token at a time from first to last; they cannot operate in parallel over all tokens in a sequence"
+        },
+        {
+          "fact": "On machine translation the Transformer was better in quality, more parallelizable and needed significantly less time to train.",
+          "source": "https://arxiv.org/abs/1706.03762",
+          "quote": "superior in quality while being more parallelizable and requiring significantly less time to train"
+        }
+      ]
+    },
+    {
+      "id": "Q02",
+      "type": "technical",
+      "question": "What is retrieval-augmented generation (RAG), when was it introduced, and does it eliminate hallucinations in language models?",
+      "expected_sources": [
+        "arxiv",
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "RAG was first proposed in 2020.",
+          "source": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation",
+          "quote": "The technique was first proposed in 2020"
+        },
+        {
+          "fact": "RAG combines a pre-trained seq2seq model (parametric memory) with a dense vector index of Wikipedia (non-parametric memory) accessed by a neural retriever.",
+          "source": "https://arxiv.org/abs/2005.11401",
+          "quote": "the parametric memory is a pre-trained seq2seq model and the non-parametric memory is a dense vector index of Wikipedia, accessed with a pre-trained neural retriever"
+        },
+        {
+          "fact": "RAG reduces hallucinations but does not prevent them.",
+          "source": "https://en.wikipedia.org/wiki/Retrieval-augmented_generation",
+          "quote": "RAG does not prevent hallucinations in LLMs"
+        }
+      ],
+      "must_not_claim": [
+        "RAG eliminates or fully prevents hallucinations."
+      ]
+    },
+    {
+      "id": "Q03",
+      "type": "technical",
+      "question": "What is LoRA (Low-Rank Adaptation), and how much does it reduce the cost of fine-tuning a model like GPT-3?",
+      "expected_sources": [
+        "arxiv"
+      ],
+      "expected_facts": [
+        {
+          "fact": "LoRA freezes the pre-trained weights and adds trainable rank decomposition matrices to each Transformer layer.",
+          "source": "https://arxiv.org/abs/2106.09685",
+          "quote": "freezes the pre-trained model weights and injects trainable rank decomposition matrices into each layer of the Transformer architecture"
+        },
+        {
+          "fact": "Compared with fine-tuning GPT-3 175B with Adam, LoRA cuts trainable parameters by 10,000 times and GPU memory by 3 times.",
+          "source": "https://arxiv.org/abs/2106.09685",
+          "quote": "reduce the number of trainable parameters by 10,000 times and the GPU memory requirement by 3 times"
+        },
+        {
+          "fact": "Unlike adapters, LoRA adds no inference latency.",
+          "source": "https://arxiv.org/abs/2106.09685",
+          "quote": "unlike adapters, no additional inference latency"
+        }
+      ]
+    },
+    {
+      "id": "Q04",
+      "type": "technical",
+      "question": "How do BERT and GPT differ in architecture and in how they are pre-trained?",
+      "expected_sources": [
+        "wikipedia",
+        "arxiv"
+      ],
+      "expected_facts": [
+        {
+          "fact": "BERT was introduced by Google researchers in October 2018.",
+          "source": "https://en.wikipedia.org/wiki/BERT_(language_model)",
+          "quote": "introduced in October 2018 by researchers at Google"
+        },
+        {
+          "fact": "BERT is an encoder-only transformer.",
+          "source": "https://en.wikipedia.org/wiki/BERT_(language_model)",
+          "quote": "It uses the encoder-only transformer architecture"
+        },
+        {
+          "fact": "BERT is pre-trained with masked token prediction and next sentence prediction.",
+          "source": "https://en.wikipedia.org/wiki/BERT_(language_model)",
+          "quote": "BERT is trained by masked token prediction and next sentence prediction"
+        },
+        {
+          "fact": "BERT is bidirectional: it uses context from both the left and the right of each word.",
+          "source": "https://arxiv.org/abs/1810.04805",
+          "quote": "jointly conditioning on both left and right context in all layers"
+        },
+        {
+          "fact": "GPT models use only the decoder and are pre-trained to predict the next token.",
+          "source": "https://en.wikipedia.org/wiki/Generative_pre-trained_transformer",
+          "quote": "GPT models use only the decoder part of the transformer architecture, pre-trained to predict the next token in a sequence"
+        },
+        {
+          "fact": "OpenAI introduced GPT-1 in 2018.",
+          "source": "https://en.wikipedia.org/wiki/Generative_pre-trained_transformer",
+          "quote": "introducing the GPT-1 model in 2018"
+        }
+      ]
+    },
+    {
+      "id": "Q05",
+      "type": "technical",
+      "question": "What is chain-of-thought prompting, which kinds of tasks does it improve, and does it work as well in small language models?",
+      "expected_sources": [
+        "arxiv",
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "Chain-of-thought prompting has the model generate a series of intermediate reasoning steps.",
+          "source": "https://arxiv.org/abs/2201.11903",
+          "quote": "generating a chain of thought -- a series of intermediate reasoning steps"
+        },
+        {
+          "fact": "The prompt gives a few worked examples written as chains of thought.",
+          "source": "https://arxiv.org/abs/2201.11903",
+          "quote": "a few chain of thought demonstrations are provided as exemplars in prompting"
+        },
+        {
+          "fact": "It improves arithmetic, commonsense and symbolic reasoning tasks.",
+          "source": "https://arxiv.org/abs/2201.11903",
+          "quote": "improves performance on a range of arithmetic, commonsense, and symbolic reasoning tasks"
+        },
+        {
+          "fact": "The ability emerges in sufficiently large models, so small models do not benefit the same way.",
+          "source": "https://arxiv.org/abs/2201.11903",
+          "quote": "such reasoning abilities emerge naturally in sufficiently large language models"
+        },
+        {
+          "fact": "A 540B-parameter model prompted with eight chain-of-thought examples reached state-of-the-art accuracy on the GSM8K math word problems.",
+          "source": "https://arxiv.org/abs/2201.11903",
+          "quote": "prompting a 540B-parameter language model with just eight chain of thought exemplars achieves state of the art accuracy on the GSM8K benchmark"
+        }
+      ],
+      "must_not_claim": [
+        "Chain-of-thought prompting works equally well in small models."
+      ]
+    },
+    {
+      "id": "Q06",
+      "type": "technical",
+      "question": "What problem do residual connections solve in deep neural networks, and what did ResNet achieve with them?",
+      "expected_sources": [
+        "arxiv",
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "Residual learning makes networks much deeper than before easier to train.",
+          "source": "https://arxiv.org/abs/1512.03385",
+          "quote": "a residual learning framework to ease the training of networks that are substantially deeper than those used previously"
+        },
+        {
+          "fact": "ResNets reached 152 layers on ImageNet, 8 times deeper than VGG nets but with lower complexity.",
+          "source": "https://arxiv.org/abs/1512.03385",
+          "quote": "a depth of up to 152 layers---8x deeper than VGG nets but still having lower complexity"
+        },
+        {
+          "fact": "ResNet won first place in the ILSVRC 2015 classification task.",
+          "source": "https://arxiv.org/abs/1512.03385",
+          "quote": "won the 1st place on the ILSVRC 2015 classification task"
+        },
+        {
+          "fact": "Residual connections also mitigate the vanishing gradient problem to some extent.",
+          "source": "https://en.wikipedia.org/wiki/Residual_neural_network",
+          "quote": "mitigating the vanishing gradient problem to some extent"
+        }
+      ]
+    },
+    {
+      "id": "Q07",
+      "type": "science_history",
+      "question": "How do mRNA vaccines work, and what discovery earned Katalin Karikó and Drew Weissman the 2023 Nobel Prize?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The mRNA is delivered inside lipid nanoparticles that protect it and help it enter cells.",
+          "source": "https://en.wikipedia.org/wiki/MRNA_vaccine",
+          "quote": "encapsulated in lipid nanoparticles that protect the RNA strands and help their absorption into the cells"
+        },
+        {
+          "fact": "Cells read the mRNA with their ribosomes and make the viral antigen it encodes.",
+          "source": "https://en.wikipedia.org/wiki/MRNA_vaccine",
+          "quote": "use their internal machinery (ribosomes) to read the mRNA and produce the viral antigens that the mRNA encodes"
+        },
+        {
+          "fact": "The mRNA is translated in the cytoplasm and does not affect the genomic DNA in the nucleus.",
+          "source": "https://en.wikipedia.org/wiki/MRNA_vaccine",
+          "quote": "translated in the cytoplasm and do not affect the body's genomic DNA"
+        },
+        {
+          "fact": "Karikó and Weissman received the 2023 Nobel Prize in Physiology or Medicine for discovering nucleoside modifications that suppress the immune reaction to RNA.",
+          "source": "https://en.wikipedia.org/wiki/Katalin_Karik%C3%B3",
+          "quote": "nucleoside modifications that suppress the immunogenicity of RNA"
+        }
+      ],
+      "must_not_claim": [
+        "mRNA vaccines change or integrate into a person's DNA."
+      ]
+    },
+    {
+      "id": "Q08",
+      "type": "science_history",
+      "question": "Who were the crew of Apollo 11, what did each of them do during the Moon landing, and when did the landing happen?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The crew were Commander Neil Armstrong, Command Module Pilot Michael Collins and Lunar Module Pilot Buzz Aldrin.",
+          "source": "https://en.wikipedia.org/wiki/Apollo_11",
+          "quote": "Commander Neil Armstrong, Command Module Pilot Michael Collins, and Lunar Module Pilot Edwin \"Buzz\" Aldrin"
+        },
+        {
+          "fact": "Apollo 11 flew from July 16 to 24, 1969, and was the first mission to land humans on the Moon.",
+          "source": "https://en.wikipedia.org/wiki/Apollo_11",
+          "quote": "Apollo 11 (July 16-24, 1969) was the American spaceflight that first landed humans on the Moon"
+        },
+        {
+          "fact": "Armstrong and Aldrin landed in the lunar module Eagle in the Sea of Tranquility on July 20.",
+          "source": "https://en.wikipedia.org/wiki/Apollo_11",
+          "quote": "Armstrong and Aldrin descended to the surface aboard the LM Eagle, landing in the Sea of Tranquility (Mare Tranquillitatis) on July 20 at 20:17 UTC"
+        },
+        {
+          "fact": "Collins stayed in lunar orbit aboard the command module Columbia.",
+          "source": "https://en.wikipedia.org/wiki/Apollo_11",
+          "quote": "Collins remained in lunar orbit aboard the CM Columbia"
+        },
+        {
+          "fact": "Armstrong was the first person to walk on the Moon, followed by Aldrin nineteen minutes later.",
+          "source": "https://en.wikipedia.org/wiki/Apollo_11",
+          "quote": "Armstrong became the first human to walk on the Moon approximately six hours after landing, followed by Aldrin nineteen minutes later"
+        }
+      ]
+    },
+    {
+      "id": "Q09",
+      "type": "science_history",
+      "question": "How does CRISPR-Cas9 genome editing work, and who received the Nobel Prize for developing it?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The Cas9 nuclease, guided by a synthetic guide RNA, cuts the genome at a chosen location so genes can be removed or added.",
+          "source": "https://en.wikipedia.org/wiki/CRISPR_gene_editing",
+          "quote": "delivering the Cas9 nuclease complexed with a synthetic guide RNA (gRNA) into a cell, the cell's genome can be cut at a desired location, allowing existing genes to be removed or new ones added"
+        },
+        {
+          "fact": "Jennifer Doudna and Emmanuelle Charpentier first proposed CRISPR-Cas9 for programmable genome editing in 2012.",
+          "source": "https://en.wikipedia.org/wiki/Jennifer_Doudna",
+          "quote": "In 2012, Doudna and Emmanuelle Charpentier were the first to propose that CRISPR-Cas9"
+        },
+        {
+          "fact": "Doudna and Charpentier received the 2020 Nobel Prize in Chemistry.",
+          "source": "https://en.wikipedia.org/wiki/Jennifer_Doudna",
+          "quote": "She received the 2020 Nobel Prize in Chemistry, with Emmanuelle Charpentier"
+        }
+      ]
+    },
+    {
+      "id": "Q10",
+      "type": "science_history",
+      "question": "What causes the seasons on Earth, and is Earth closest to the Sun during the Northern Hemisphere's summer?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The seasons are caused by Earth's axial tilt.",
+          "source": "https://en.wikipedia.org/wiki/Season",
+          "quote": "It is Earth's axial tilt that causes the Sun to be higher in the sky during the summer months"
+        },
+        {
+          "fact": "Earth's axial tilt is about 23.44 degrees.",
+          "source": "https://en.wikipedia.org/wiki/Axial_tilt",
+          "quote": "Earth currently has an axial tilt of about 23.44"
+        },
+        {
+          "fact": "The seasons are not caused by changes in Earth's distance from the Sun.",
+          "source": "https://en.wikipedia.org/wiki/Season",
+          "quote": "The seasons are not the result of the variation in Earth's distance to the Sun"
+        },
+        {
+          "fact": "Earth is closest to the Sun (perihelion) in January and farthest (aphelion) in July.",
+          "source": "https://en.wikipedia.org/wiki/Season",
+          "quote": "Earth reaches perihelion (the point in its orbit closest to the Sun) in January"
+        }
+      ],
+      "must_not_claim": [
+        "The seasons are caused by Earth being closer to or farther from the Sun.",
+        "Earth is closest to the Sun during the Northern Hemisphere's summer."
+      ]
+    },
+    {
+      "id": "Q11",
+      "type": "science_history",
+      "question": "What is the James Webb Space Telescope designed to observe, when and how was it launched, and where does it operate?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "Webb is designed for infrared astronomy.",
+          "source": "https://en.wikipedia.org/wiki/James_Webb_Space_Telescope",
+          "quote": "a space telescope designed to conduct infrared astronomy"
+        },
+        {
+          "fact": "It was launched on 25 December 2021 on an Ariane 5 rocket from Kourou, French Guiana.",
+          "source": "https://en.wikipedia.org/wiki/James_Webb_Space_Telescope",
+          "quote": "launched on 25 December 2021 on an Ariane 5 rocket from Kourou, French Guiana"
+        },
+        {
+          "fact": "It orbits the Sun near the Sun-Earth L2 point, about 1.5 million km from Earth.",
+          "source": "https://en.wikipedia.org/wiki/James_Webb_Space_Telescope",
+          "quote": "a solar orbit near the Sun-Earth L2 Lagrange point, about 1.5 million kilometers (930,000 mi) from Earth"
+        },
+        {
+          "fact": "Its primary mirror is 6.5 m across, made of 18 hexagonal segments.",
+          "source": "https://en.wikipedia.org/wiki/James_Webb_Space_Telescope",
+          "quote": "18 hexagonal mirror segments made of gold-plated beryllium, which together create a 6.5-meter-diameter"
+        }
+      ]
+    },
+    {
+      "id": "Q12",
+      "type": "science_history",
+      "question": "Who invented the World Wide Web, when was it proposed, and how is the Web different from the Internet?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "Tim Berners-Lee invented the Web at CERN in 1989; it opened to the public in 1993.",
+          "source": "https://en.wikipedia.org/wiki/World_Wide_Web",
+          "quote": "The Web was invented by English computer scientist Tim Berners-Lee while at CERN in 1989 and opened to the public in 1993"
+        },
+        {
+          "fact": "He proposed the information management system on 12 March 1989.",
+          "source": "https://en.wikipedia.org/wiki/Tim_Berners-Lee",
+          "quote": "Berners-Lee proposed an information management system on 12 March 1989"
+        },
+        {
+          "fact": "The Web is an information system for sharing content over the Internet.",
+          "source": "https://en.wikipedia.org/wiki/World_Wide_Web",
+          "quote": "a global interconnected information system that enables content sharing over the Internet"
+        },
+        {
+          "fact": "The Internet is a global system of interconnected computer networks.",
+          "source": "https://en.wikipedia.org/wiki/World_Wide_Web",
+          "quote": "The Internet is a global system of computer networks interconnected through telecommunications and optical networking"
+        }
+      ],
+      "must_not_claim": [
+        "The World Wide Web and the Internet are the same thing."
+      ]
+    },
+    {
+      "id": "Q13",
+      "type": "comparison",
+      "question": "How do TCP and UDP differ in reliability and ordering, and what kinds of applications use UDP?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "TCP provides reliable, ordered and error-checked delivery.",
+          "source": "https://en.wikipedia.org/wiki/Transmission_Control_Protocol",
+          "quote": "providing reliable, ordered, and error-checked delivery of a stream of octets"
+        },
+        {
+          "fact": "UDP is connectionless.",
+          "source": "https://en.wikipedia.org/wiki/User_Datagram_Protocol",
+          "quote": "UDP is a connectionless protocol"
+        },
+        {
+          "fact": "UDP guarantees neither delivery, ordering nor duplicate protection.",
+          "source": "https://en.wikipedia.org/wiki/User_Datagram_Protocol",
+          "quote": "there is no guarantee of delivery, ordering, or duplicate protection"
+        },
+        {
+          "fact": "Without retransmission delays, UDP suits real-time applications such as Voice over IP and online games.",
+          "source": "https://en.wikipedia.org/wiki/User_Datagram_Protocol",
+          "quote": "The lack of retransmission delays makes it suitable for real-time applications such as Voice over IP, online games"
+        },
+        {
+          "fact": "DNS uses UDP.",
+          "source": "https://en.wikipedia.org/wiki/User_Datagram_Protocol",
+          "quote": "Numerous key Internet applications use UDP, including: the Domain Name System (DNS)"
+        }
+      ],
+      "must_not_claim": [
+        "UDP guarantees delivery."
+      ]
+    },
+    {
+      "id": "Q14",
+      "type": "comparison",
+      "question": "How do nuclear fission and nuclear fusion differ, and which one powers the Sun and which one powers today's nuclear power plants?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "In fusion, two or more atomic nuclei combine into a larger nucleus.",
+          "source": "https://en.wikipedia.org/wiki/Nuclear_fusion",
+          "quote": "two or more atomic nuclei combine to form a larger nucleus"
+        },
+        {
+          "fact": "In fission, a nucleus splits into two or more smaller nuclei.",
+          "source": "https://en.wikipedia.org/wiki/Nuclear_fission",
+          "quote": "the nucleus of an atom splits into two or more smaller nuclei"
+        },
+        {
+          "fact": "The Sun generates its energy by fusing hydrogen into helium.",
+          "source": "https://en.wikipedia.org/wiki/Nuclear_fusion",
+          "quote": "generates its energy by nuclear fusion of hydrogen nuclei into helium"
+        },
+        {
+          "fact": "Nuclear power plants run on controlled fission chain reactions.",
+          "source": "https://en.wikipedia.org/wiki/Nuclear_fission",
+          "quote": "to sustain a nuclear chain reaction allows nuclear power plants to operate in a delayed critical state for a controllable energy release"
+        }
+      ],
+      "must_not_claim": [
+        "The Sun is powered by nuclear fission.",
+        "Today's nuclear power plants run on fusion."
+      ]
+    },
+    {
+      "id": "Q15",
+      "type": "comparison",
+      "question": "How did AlphaGo's training differ from AlphaZero's, and what did each one achieve?",
+      "expected_sources": [
+        "wikipedia",
+        "arxiv"
+      ],
+      "expected_facts": [
+        {
+          "fact": "In March 2016 AlphaGo beat Lee Sedol in a five-game match.",
+          "source": "https://en.wikipedia.org/wiki/AlphaGo",
+          "quote": "In March 2016, it beat Lee Sedol in a five-game match"
+        },
+        {
+          "fact": "The final score was 4 games to 1 for AlphaGo.",
+          "source": "https://en.wikipedia.org/wiki/AlphaGo",
+          "quote": "giving a final score of 4 games to 1 in favour of AlphaGo"
+        },
+        {
+          "fact": "AlphaGo learned from both human and computer play.",
+          "source": "https://en.wikipedia.org/wiki/AlphaGo",
+          "quote": "extensive training, both from human and computer play"
+        },
+        {
+          "fact": "AlphaZero started from random play, given no domain knowledge except the game rules.",
+          "source": "https://arxiv.org/abs/1712.01815",
+          "quote": "Starting from random play, and given no domain knowledge except the game rules"
+        },
+        {
+          "fact": "Within 24 hours AlphaZero reached superhuman play in chess, shogi and Go and beat a world-champion program in each.",
+          "source": "https://arxiv.org/abs/1712.01815",
+          "quote": "AlphaZero achieved within 24 hours a superhuman level of play in the games of chess and shogi (Japanese chess) as well as Go, and convincingly defeated a world-champion program in each case"
+        },
+        {
+          "fact": "In chess it beat Stockfish 8 in a 100-game match (28 wins, 0 losses, 72 draws).",
+          "source": "https://en.wikipedia.org/wiki/AlphaZero",
+          "quote": "the algorithm defeated Stockfish 8 in a time-controlled 100-game tournament (28 wins, 0 losses, and 72 draws)"
+        }
+      ],
+      "must_not_claim": [
+        "AlphaZero was trained on human games."
+      ]
+    },
+    {
+      "id": "Q16",
+      "type": "false_premise",
+      "question": "Why can the Great Wall of China be seen from the Moon with the naked eye?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "It cannot: the Great Wall is not visible to the naked eye from the Moon.",
+          "source": "https://en.wikipedia.org/wiki/Great_Wall_of_China",
+          "quote": "The Great Wall of China cannot be seen by the naked human eye from the Moon"
+        },
+        {
+          "fact": "From the Moon its width would look like a human hair seen from 3 km away.",
+          "source": "https://en.wikipedia.org/wiki/Great_Wall_of_China",
+          "quote": "the same as that of a human hair viewed from 3 km"
+        },
+        {
+          "fact": "Even from low Earth orbit NASA says it is barely visible, and only in nearly perfect conditions.",
+          "source": "https://en.wikipedia.org/wiki/Great_Wall_of_China",
+          "quote": "NASA states that it is barely visible, and only under nearly perfect conditions"
+        }
+      ],
+      "must_not_claim": [
+        "The Great Wall of China is visible from the Moon with the naked eye."
+      ]
+    },
+    {
+      "id": "Q17",
+      "type": "false_premise",
+      "question": "Why did Albert Einstein receive the Nobel Prize for his theory of relativity?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "Einstein's Nobel Prize was not for relativity: he received the 1921 Nobel Prize in Physics for his services to theoretical physics and especially the law of the photoelectric effect.",
+          "source": "https://en.wikipedia.org/wiki/Albert_Einstein",
+          "quote": "He received the 1921 Nobel Prize in Physics for \"his services to theoretical physics, and especially for his discovery of the law of the photoelectric effect\""
+        }
+      ],
+      "must_not_claim": [
+        "Einstein received the Nobel Prize for the theory of relativity."
+      ]
+    },
+    {
+      "id": "Q18",
+      "type": "false_premise",
+      "question": "Why do humans use only 10 percent of their brains?",
+      "expected_sources": [
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The idea is a myth.",
+          "source": "https://en.wikipedia.org/wiki/Ten-percent-of-the-brain_myth",
+          "quote": "The ten-percent-of-the-brain myth states that humans generally use only one-tenth"
+        },
+        {
+          "fact": "Brain mapping shows all areas of the brain have a function and are used nearly all the time.",
+          "source": "https://en.wikipedia.org/wiki/Ten-percent-of-the-brain_myth",
+          "quote": "all areas of the brain have a function and that they are used nearly all the time"
+        }
+      ],
+      "must_not_claim": [
+        "Humans use only 10 percent of their brains."
+      ]
+    },
+    {
+      "id": "Q19",
+      "type": "thin_or_numeric",
+      "question": "In Google's Agent Development Kit (ADK), how does a LoopAgent decide when to stop looping?",
+      "expected_sources": [
+        "web"
+      ],
+      "expected_facts": [
+        {
+          "fact": "The LoopAgent does not decide on its own when to stop; a termination mechanism has to be provided.",
+          "source": "https://google.github.io/adk-docs/agents/workflow-agents/loop-agents/",
+          "quote": "the LoopAgent itself does not inherently decide when to stop looping"
+        },
+        {
+          "fact": "Setting max_iterations ends the loop after that many iterations.",
+          "source": "https://google.github.io/adk-docs/agents/workflow-agents/loop-agents/",
+          "quote": "The loop will terminate after that many iterations"
+        },
+        {
+          "fact": "A sub-agent can end the loop early by signalling termination when its condition is met.",
+          "source": "https://google.github.io/adk-docs/agents/workflow-agents/loop-agents/",
+          "quote": "If the condition is met, the sub-agent can signal termination"
+        }
+      ]
+    },
+    {
+      "id": "Q20",
+      "type": "thin_or_numeric",
+      "question": "How many parameters does GPT-3 have, how long is its context window, and where did most of its training data come from?",
+      "expected_sources": [
+        "arxiv",
+        "wikipedia"
+      ],
+      "expected_facts": [
+        {
+          "fact": "GPT-3 has 175 billion parameters, 10 times more than any earlier non-sparse language model.",
+          "source": "https://arxiv.org/abs/2005.14165",
+          "quote": "an autoregressive language model with 175 billion parameters, 10x more than any previous non-sparse language model"
+        },
+        {
+          "fact": "Its context window is 2,048 tokens.",
+          "source": "https://en.wikipedia.org/wiki/GPT-3",
+          "quote": "It has a context window size of 2,048 tokens"
+        },
+        {
+          "fact": "60 percent of its weighted pre-training data came from a filtered version of Common Crawl (410 billion tokens).",
+          "source": "https://en.wikipedia.org/wiki/GPT-3",
+          "quote": "Sixty percent of the weighted pre-training dataset for GPT-3 comes from a filtered version of Common Crawl consisting of 410 billion byte-pair-encoded tokens"
+        },
+        {
+          "fact": "OpenAI released GPT-3 in 2020.",
+          "source": "https://en.wikipedia.org/wiki/GPT-3",
+          "quote": "released by OpenAI in 2020"
+        }
+      ],
+      "must_not_claim": [
+        "GPT-3 has 175 million parameters."
+      ]
+    }
+  ]
+}
