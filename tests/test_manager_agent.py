@@ -132,10 +132,10 @@ def test_3_11_2_cap_of_one_keeps_only_top_priority(monkeypatch):
     plan = decompose_question(make_plan([(1, 3), (2, 1), (3, 2)]))
     assert ids_of(plan) == [2]
 
-def test_3_11_1_model_id_defaults_to_gemini_2_5_flash(monkeypatch):
+def test_3_11_1_model_id_defaults_to_gemini_3_5_flash_lite(monkeypatch):
     monkeypatch.delenv("SP201_MODEL_ID", raising=False)
     assert get_model_id() == DEFAULT_MODEL_ID
-    assert get_model_id() == "gemini-2.5-flash"
+    assert get_model_id() == "gemini-3.5-flash-lite"
 
 def test_3_11_1_model_id_comes_from_environment(monkeypatch):
     monkeypatch.setenv("SP201_MODEL_ID", "gemini-9.9-test")
