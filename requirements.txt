@@ -1,0 +1,14 @@
+# SP-201 Multi-Agent Research
+# Python 3.10 or newer (google-adk requires it)
+# Install: pip install -r requirements.txt
+
+google-adk==2.9.2
+pydantic==2.13.5
+python-dotenv==1.2.4
+
+# Retrieval libraries imported by search_agent.py
+wikipedia==1.4.0
+duckduckgo-search==8.1.1
+
+# Tests: python -m pytest tests
+pytest==9.1.1
