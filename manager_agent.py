@@ -2,7 +2,7 @@
 # capped at max_sub_questions(), which reads SP201_MAX_SUB_QUESTIONS and
 # clamps it to [1, ABSOLUTE_MAX_SUB_QUESTIONS]. No tools are attached yet;
 # AgentTool(search_agent) is added in Step 2, once the output_schema vs
-# AgentTool constraint on gemini-2.5-flash is settled in its own ADR.
+# AgentTool constraint on gemini-3.5-flash-lite is settled in its own ADR.
 # Step 2 must read the plan from state[STATE_PLAN], not from the Manager's
 # last message. The cap is applied in enforce_sub_question_cap, which only
 # rewrites state; the model's original uncapped reply stays in history.
@@ -20,7 +20,7 @@ from schemas import max_sub_questions
 
 # Model ID comes from the environment, never from a call site
 MODEL_ID_ENV = "SP201_MODEL_ID"
-DEFAULT_MODEL_ID = "gemini-2.5-flash"
+DEFAULT_MODEL_ID = "gemini-3.5-flash-lite"
 
 # Session-state key for the running model-call count
 STATE_MODEL_CALLS = "model_call_count"
