@@ -20,7 +20,7 @@ from schemas import max_sub_questions
 
 # Model ID comes from the environment, never from a call site
 MODEL_ID_ENV = "SP201_MODEL_ID"
-DEFAULT_MODEL_ID = "gemini-2.5-flash"
+DEFAULT_MODEL_ID = "gemini-3.5-flash-lite"
 
 # Session-state key for the running model-call count
 STATE_MODEL_CALLS = "model_call_count"
