@@ -19,6 +19,7 @@ from manager_agent import DEFAULT_MODEL_ID
 from manager_agent import STATE_MODEL_CALLS
 from manager_agent import count_model_call
 from manager_agent import get_model_id
+from schemas import ClaimCheck
 from schemas import DraftReport
 from schemas import FactCheckVerdict
 from schemas import STATE_DRAFT
@@ -43,6 +44,9 @@ DELIMITER_TAGS = ("untrusted_evidence", "evidence_set", "claim", "claims_to_chec
 DELIMITER_PATTERN = re.compile(
     r"<\s*(/?)\s*(" + "|".join(DELIMITER_TAGS) + r")\b", re.IGNORECASE
 )
+
+# Reason recorded for a claim the model returned no verdict for
+NOT_CHECKED_REASON = "The Fact-Checker returned no verdict for this claim."
 
 
 class EvidenceError(ValueError):
@@ -173,16 +177,52 @@ def read_known_evidence_ids(state):
     return results.all_evidence_ids()
 
 
+def flag_unchecked_claims(verdict, draft):
+    """Return a verdict with exactly one check for each claim in the draft.
+
+    A claim the model skipped is added as unsupported and the draft fails, so
+    the claim is flagged instead of the run stopping or the claim passing
+    unchecked. A check for a claim number the draft does not have is dropped.
+    """
+    if verdict.covers(draft):
+        return verdict
+
+    returned = {}
+    for check in verdict.checks:
+        returned[check.claim_number] = check
+
+    checks = []
+    skipped = []
+    for claim in draft.all_claims():
+        check = returned.get(claim.claim_number)
+        if check is None:
+            skipped.append(str(claim.claim_number))
+            check = ClaimCheck(
+                claim_number=claim.claim_number,
+                verdict=Verdict.UNSUPPORTED,
+                reason=NOT_CHECKED_REASON,
+            )
+        checks.append(check)
+
+    result = verdict.result
+    feedback = verdict.feedback
+    if skipped:
+        label = "claim" if len(skipped) == 1 else "claims"
+        note = f"No verdict was returned for {label} {', '.join(skipped)}."
+        result = "fail"
+        feedback = f"{feedback} {note}".strip()
+    return FactCheckVerdict(checks=checks, result=result, feedback=feedback)
+
+
 def verify_draft(raw_verdict, draft=None, known_evidence_ids=None):
-    """Validate a verdict and verify full claim coverage against the draft."""
+    """Validate a verdict against the draft and flag any claim it skipped."""
     verdict = parse_verdict(raw_verdict)
 
     if draft is not None:
         checked_draft = parse_draft(draft)
         if known_evidence_ids is not None:
             checked_draft.validate_against(known_evidence_ids)
-        if not verdict.covers(checked_draft):
-            raise ValueError("Every claim in the draft must receive a verdict")
+        verdict = flag_unchecked_claims(verdict, checked_draft)
 
     return verdict
 
