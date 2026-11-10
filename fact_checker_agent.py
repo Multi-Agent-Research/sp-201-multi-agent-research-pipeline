@@ -1,11 +1,10 @@
 """Fact-Checker agent for the SP-201 research pipeline.
 
-Verifies each claim in DraftReport against its cited evidence passages and
-records per-claim verdicts plus an overall pass/fail result.
-
-Evidence reaches the model through a before_model_callback on the user
-channel, never the system instruction. Persistence is not this module's job:
-EvidenceStore.save_claims writes claims and verdicts.
+Verifies each claim in DraftReport against its cited evidence, records a
+verdict for each claim, and gives an overall pass/fail result. Evidence
+reaches the model through a before_model_callback on the user channel,
+never the system instruction. Persistence is not this module's job;
+EvidenceStore.save_claims handles it.
 """
 
 import re
@@ -193,12 +192,14 @@ def record_verdict(state, verdict):
 
     The Synthesizer reads STATE_FEEDBACK to tell a revision from a first
     draft, so skipping this makes the loop redraft instead of revise.
+    Feedback is cleared by assignment because ADK session state is not a
+    dict and has no pop or del.
     """
     state[STATE_VERDICT] = verdict.model_dump(mode="json")
     if verdict.result == "fail":
         state[STATE_FEEDBACK] = verdict.feedback
     else:
-        state.pop(STATE_FEEDBACK, None)
+        state[STATE_FEEDBACK] = ""
     return verdict
 
 
