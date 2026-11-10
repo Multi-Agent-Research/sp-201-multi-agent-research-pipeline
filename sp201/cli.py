@@ -49,9 +49,10 @@ class ModelCallCounter(BasePlugin):
         return None
 
 
-# Builds the agent the CLI runs. The full pipeline (Manager, then the
-# Synthesizer / Fact-Checker loop) is not assembled yet, so for now this is
-# the Manager on its own. When the pipeline lands, return it here instead.
+# Builds the agent the CLI runs. The full pipeline is pipeline.build_pipeline(),
+# but Search is not wired into the Manager yet, so a full run would stop at the
+# Synthesizer with no evidence. Until Search lands this stays the Manager on its
+# own; then return pipeline.build_pipeline() here instead.
 def build_root_agent():
     return build_manager_agent()
 
@@ -142,8 +143,10 @@ def render(state, calls, source_reader=read_sources):
         lines.append("No report shown: the Fact-Checker has not checked the draft (SRS 3.6.4).")
     else:
         try:
-            report = build_final_report(DraftReport.model_validate(raw_draft),
-                                        FactCheckVerdict.model_validate(raw_verdict))
+            verdict = FactCheckVerdict.model_validate(raw_verdict)
+            # The loop only ends on a fail once its revisions run out (SRS 3.10.2)
+            report = build_final_report(DraftReport.model_validate(raw_draft), verdict,
+                                        incomplete=verdict.result == "fail")
         except ValueError as error:
             lines.append(f"No report shown: {error}")
         else:
