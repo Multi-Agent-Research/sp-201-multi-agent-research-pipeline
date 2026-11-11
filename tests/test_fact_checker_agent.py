@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from fact_checker_agent import DEFAULT_MODEL_ID
 from fact_checker_agent import FACT_CHECKER_AGENT_NAME
 from fact_checker_agent import MAX_PASSAGE_CHARS
+from fact_checker_agent import NOT_CHECKED_REASON
 from fact_checker_agent import STATE_MODEL_CALLS
 from fact_checker_agent import EvidenceError
 from fact_checker_agent import build_data_message
@@ -201,12 +202,48 @@ def test_3_6_1_record_verdict_writes_plain_json_data():
     assert state[STATE_VERDICT]["checks"][0]["verdict"] == "supported"
 
 
-# Full coverage of the draft (3.6.4) and citation checking (3.5.2)
+# Every claim gets a verdict: a claim the model skipped is flagged, not
+# passed unchecked (3.6.4), and citation checking (3.5.2)
 
-def test_3_6_4_rejects_verdict_missing_a_draft_claim():
-    with pytest.raises(ValueError):
-        verify_draft(make_verdict([make_check(1, "supported")], result="pass"),
-                     draft=make_draft([1, 2]))
+def test_3_6_4_skipped_claim_is_flagged_as_unsupported():
+    verdict = verify_draft(make_verdict([make_check(1, "supported")], result="pass"),
+                           draft=make_draft([1, 2]))
+    skipped = verdict.checks[1]
+    assert skipped.claim_number == 2
+    assert skipped.verdict.value == "unsupported"
+    assert skipped.reason == NOT_CHECKED_REASON
+    assert verdict.flagged_claim_numbers() == [2]
+
+def test_3_6_4_skipped_claim_turns_a_pass_into_a_fail():
+    verdict = verify_draft(make_verdict([make_check(1, "supported")], result="pass"),
+                           draft=make_draft([1, 2]))
+    assert verdict.result == "fail"
+    assert verdict.feedback == "No verdict was returned for claim 2."
+    assert should_escalate(verdict) is False
+
+def test_3_6_1_skipped_claims_are_added_to_the_models_feedback():
+    verdict = verify_draft(make_verdict([make_check(1, "unsupported")],
+                                        result="fail", feedback="Drop claim 1."),
+                           draft=make_draft([1, 2, 3]))
+    assert verdict.feedback == "Drop claim 1. No verdict was returned for claims 2, 3."
+
+def test_3_6_4_check_for_a_claim_not_in_the_draft_is_dropped():
+    checks = [make_check(1, "supported"), make_check(9, "supported")]
+    verdict = verify_draft(make_verdict(checks, result="pass"), draft=make_draft([1]))
+    assert [check.claim_number for check in verdict.checks] == [1]
+    assert verdict.result == "pass"
+
+def test_3_6_4_misnumbered_check_is_dropped_and_its_claim_flagged():
+    checks = [make_check(1, "supported"), make_check(3, "supported")]
+    verdict = verify_draft(make_verdict(checks, result="pass"), draft=make_draft([1, 2]))
+    assert [check.claim_number for check in verdict.checks] == [1, 2]
+    assert verdict.flagged_claim_numbers() == [2]
+
+def test_3_6_4_complete_verdict_is_returned_unchanged():
+    raw_verdict = make_verdict([make_check(2, "supported"), make_check(1, "supported")],
+                               result="pass")
+    verdict = verify_draft(raw_verdict, draft=make_draft([1, 2]))
+    assert verdict == FactCheckVerdict.model_validate(raw_verdict)
 
 def test_3_6_4_rejects_duplicate_claim_checks():
     with pytest.raises(ValidationError):
@@ -230,6 +267,13 @@ def test_3_6_5_marks_failing_claims_in_final_report():
     ]
     verdict = verify_draft(make_verdict(checks, result="fail", feedback="Fix 2 and 3."), draft=draft)
     assert build_final_report(draft, verdict).flagged_claim_numbers == [2, 3]
+
+def test_3_6_5_skipped_claim_is_marked_in_the_final_report():
+    draft = DraftReport.model_validate(make_draft([1, 2]))
+    verdict = verify_draft(make_verdict([make_check(1, "supported")], result="pass"), draft=draft)
+    report = build_final_report(draft, verdict)
+    assert report.flagged_claim_numbers == [2]
+    assert report.support_score == 50.0
 
 def test_3_6_7_support_score_excludes_not_verifiable_claims():
     checks = [make_check(1, "supported"), make_check(2, "unsupported"), make_check(3, "not_verifiable")]
@@ -355,15 +399,26 @@ def test_3_7_2_after_agent_callback_passes_a_draft_on_adk_session_state():
     assert state[STATE_VERDICT]["result"] == "pass"
     assert is_revision(state) is False
 
+def test_3_6_4_after_agent_callback_flags_a_skipped_claim_on_adk_session_state():
+    state = State(value={
+        STATE_DRAFT: make_draft([1, 2]),
+        STATE_VERDICT: make_verdict([make_check(1, "supported")], result="pass"),
+    }, delta={})
+    enforce_verdict_rules(FakeCallbackContext(state))
+    assert state[STATE_VERDICT]["result"] == "fail"
+    assert state[STATE_VERDICT]["checks"][1]["verdict"] == "unsupported"
+    assert state[STATE_FEEDBACK] == "No verdict was returned for claim 2."
+
 def test_3_7_2_after_agent_callback_fails_closed_without_mutating_state():
-    incomplete = make_verdict([make_check(1, "supported")], result="pass")
+    # A pass that still holds a failing claim is malformed, so it is rejected
+    malformed = make_verdict([make_check(1, "unsupported")], result="pass")
     state = {
-        STATE_DRAFT: copy.deepcopy(make_draft([1, 2])),
-        STATE_VERDICT: copy.deepcopy(incomplete),
+        STATE_DRAFT: copy.deepcopy(make_draft([1])),
+        STATE_VERDICT: copy.deepcopy(malformed),
     }
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         enforce_verdict_rules(FakeCallbackContext(state))
-    assert state[STATE_VERDICT] == incomplete
+    assert state[STATE_VERDICT] == malformed
     assert STATE_FEEDBACK not in state
 
 def test_3_7_2_after_agent_callback_checks_search_results_ids():
