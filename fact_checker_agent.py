@@ -100,18 +100,10 @@ def format_evidence(row):
 
 
 def load_cited_evidence(evidence_ids, evidence_reader):
-    """Fetch cited evidence rows and fail closed if any ID is missing."""
+    """Fetch cited evidence rows that exist in the store."""
     rows_by_id = {}
     for row in evidence_reader(evidence_ids):
         rows_by_id[row.evidence_id] = row
-    missing = []
-    for evidence_id in evidence_ids:
-        if evidence_id not in rows_by_id:
-            missing.append(evidence_id)
-    if missing:
-        raise EvidenceError(
-            f"draft cites evidence ids that are not in the store: {missing}"
-        )
     return rows_by_id
 
 
@@ -124,7 +116,8 @@ def build_data_message(draft, rows_by_id):
     """
     parts = ["<evidence_set>"]
     for evidence_id in draft.cited_evidence_ids():
-        parts.append(format_evidence(rows_by_id[evidence_id]))
+        if evidence_id in rows_by_id:
+            parts.append(format_evidence(rows_by_id[evidence_id]))
     parts.append("</evidence_set>")
     parts.append("")
     parts.append("<claims_to_check>")
@@ -214,15 +207,49 @@ def flag_unchecked_claims(verdict, draft):
     return FactCheckVerdict(checks=checks, result=result, feedback=feedback)
 
 
+def flag_unknown_citations(verdict, draft, known_evidence_ids):
+    """Mark any claim citing an ID outside known_evidence_ids as unsupported."""
+    known = set(known_evidence_ids)
+    unknown_by_claim = {}
+    for claim in draft.all_claims():
+        unknown = sorted(set(claim.evidence_ids) - known)
+        if unknown:
+            unknown_by_claim[claim.claim_number] = unknown
+
+    if not unknown_by_claim:
+        return verdict
+
+    checks = []
+    flagged = []
+    for check in verdict.checks:
+        unknown = unknown_by_claim.get(check.claim_number)
+        if unknown is not None:
+            flagged.append(str(check.claim_number))
+            ids = ", ".join(str(evidence_id) for evidence_id in unknown)
+            check = ClaimCheck(
+                claim_number=check.claim_number,
+                verdict=Verdict.UNSUPPORTED,
+                reason=f"Cited evidence ID not in search results: {ids}.",
+            )
+        checks.append(check)
+
+    label = "claim" if len(flagged) == 1 else "claims"
+    note = f"Unknown evidence cited in {label} {', '.join(flagged)}."
+    feedback = f"{verdict.feedback} {note}".strip()
+    return FactCheckVerdict(checks=checks, result="fail", feedback=feedback)
+
+
 def verify_draft(raw_verdict, draft=None, known_evidence_ids=None):
-    """Validate a verdict against the draft and flag any claim it skipped."""
+    """Validate a verdict against the draft and flag skipped claims or unknown citations."""
     verdict = parse_verdict(raw_verdict)
 
     if draft is not None:
         checked_draft = parse_draft(draft)
-        if known_evidence_ids is not None:
-            checked_draft.validate_against(known_evidence_ids)
         verdict = flag_unchecked_claims(verdict, checked_draft)
+        if known_evidence_ids is not None:
+            verdict = flag_unknown_citations(
+                verdict, checked_draft, known_evidence_ids
+            )
 
     return verdict
 
