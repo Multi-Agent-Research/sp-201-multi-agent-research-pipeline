@@ -23,6 +23,15 @@ DEFAULT_MODEL_MAX_ATTEMPTS = 4
 # Status codes worth another attempt. Everything else in 4xx is our fault.
 RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
  
+# Gemini answers 503 when Google's servers for the model are overloaded. That
+# takes longer to clear than a blip, so it gets its own schedule: 3 retries,
+# about 10, 20 and 40 seconds apart, each nudged up to 20% either way. A run
+# gives up after about 70 seconds.
+OVERLOADED_STATUS = 503
+OVERLOAD_RETRIES = 3
+OVERLOAD_FIRST_WAIT = 10.0
+OVERLOAD_JITTER = 0.2
+ 
  
 class RetryableError(Exception):
     """A failure another attempt might fix. retry_after is the server's hint, in seconds."""
@@ -77,6 +86,14 @@ class RateLimiter:
         if delay > 0:
             await asyncio.sleep(delay)
         return delay
+ 
+ 
+def overload_delay(retry, rng=None):
+    """Seconds to wait before overload retry number `retry` (1-based): about 10, 20, 40."""
+    if rng is None:
+        rng = random.random
+    wait = OVERLOAD_FIRST_WAIT * (2 ** (retry - 1))
+    return wait * (1 - OVERLOAD_JITTER + 2 * OVERLOAD_JITTER * rng())
  
  
 def interval_for_rpm(requests_per_minute):
@@ -253,13 +270,20 @@ class RateLimitedGemini(Gemini):
                         "Gemini free-tier daily request quota is used up; it resets at "
                         "midnight Pacific. Retrying now would only waste attempts."
                     ) from error
-                if attempt >= policy.max_attempts:
+                overloaded = error.code == OVERLOADED_STATUS
+                retries = OVERLOAD_RETRIES if overloaded else policy.max_attempts - 1
+                if attempt > retries:
                     raise
-                wait = policy.delay(attempt, gemini_retry_delay(error))
-                logger.warning(
-                    "Gemini %s returned %s; retry %d of %d in %.1fs",
-                    llm_request.model, error.code, attempt, policy.max_attempts - 1, wait,
-                )
+                if overloaded:
+                    wait = overload_delay(attempt)
+                    logger.warning("Gemini is overloaded right now (503); retry %d of %d in %.0fs",
+                                   attempt, retries, wait)
+                else:
+                    wait = policy.delay(attempt, gemini_retry_delay(error))
+                    logger.warning(
+                        "Gemini %s returned %s; retry %d of %d in %.1fs",
+                        llm_request.model, error.code, attempt, retries, wait,
+                    )
                 await asyncio.sleep(wait)
                 attempt += 1
  

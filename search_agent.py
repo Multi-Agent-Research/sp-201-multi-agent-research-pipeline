@@ -75,6 +75,10 @@ PASSAGES_PER_DOCUMENT = {
 }
 MIN_PASSAGE_CHARS = 20             # shorter pieces are headings or debris
 MAX_ERROR_CHARS = 200              # per source; the error goes back into the Manager's context
+MAX_BUZZ_WORDS = 5
+# A call the tool refused before searching starts its error with this, so the
+# pipeline can tell "not searched" from "searched and found nothing"
+NOT_SEARCHED_PREFIX = "not searched: "
  
 # Spacing per source. arXiv's API terms ask for no more than one request every
 # three seconds. Wikipedia asks for serial requests; one a second is polite.
@@ -155,8 +159,34 @@ def http_get_json(url, params, limiter, **kwargs):
 # or raises FetchError.
 # --------------------------------------------------------------------------
  
+def wikipedia_page(title, http=http_get_json):
+    """One article's plain text, following redirects.
+
+    None if the article is missing, a disambiguation page or empty.
+    """
+    limiter = SOURCE_LIMITERS[SourceType.WIKIPEDIA]
+    page_data = http(WIKIPEDIA_API_URL, {
+        "action": "query", "prop": "extracts|info|pageprops", "explaintext": 1,
+        "inprop": "url", "ppprop": "disambiguation", "redirects": 1,
+        "titles": title, "format": "json", "formatversion": 2,
+    }, limiter)
+    if "error" in page_data:
+        raise FetchError(f"Wikipedia page error: {page_data['error'].get('info', page_data['error'])}")
+    pages = page_data.get("query", {}).get("pages", [])
+    if not pages:
+        return None
+    page = pages[0]
+    if page.get("missing") or "disambiguation" in page.get("pageprops", {}):
+        return None
+    content = (page.get("extract") or "").strip()
+    if not content:
+        return None
+    url = page.get("fullurl") or "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+    return RawDocument(page.get("title", title), url, "", content)
+ 
+ 
 def fetch_wikipedia(query, http=http_get_json):
-    """Searches English Wikipedia and returns the plain-text body of the best non-disambiguation hit."""
+    """Searches English Wikipedia: its top hits in rank order, skipping disambiguation pages."""
     limiter = SOURCE_LIMITERS[SourceType.WIKIPEDIA]
     found = http(WIKIPEDIA_API_URL, {
         "action": "query", "list": "search", "srsearch": query, "srnamespace": 0,
@@ -164,28 +194,18 @@ def fetch_wikipedia(query, http=http_get_json):
     }, limiter)
     if "error" in found:
         raise FetchError(f"Wikipedia search error: {found['error'].get('info', found['error'])}")
-    titles = [hit["title"] for hit in found.get("query", {}).get("search", [])]
+    documents = []
+    for hit in found.get("query", {}).get("search", []):
+        document = wikipedia_page(hit["title"], http)
+        if document is not None:
+            documents.append(document)
+    return documents
  
-    for title in titles:
-        page_data = http(WIKIPEDIA_API_URL, {
-            "action": "query", "prop": "extracts|info|pageprops", "explaintext": 1,
-            "inprop": "url", "ppprop": "disambiguation", "redirects": 1,
-            "titles": title, "format": "json", "formatversion": 2,
-        }, limiter)
-        if "error" in page_data:
-            raise FetchError(f"Wikipedia page error: {page_data['error'].get('info', page_data['error'])}")
-        pages = page_data.get("query", {}).get("pages", [])
-        if not pages:
-            continue
-        page = pages[0]
-        if page.get("missing") or "disambiguation" in page.get("pageprops", {}):
-            continue
-        content = (page.get("extract") or "").strip()
-        if not content:
-            continue
-        url = page.get("fullurl") or "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
-        return [RawDocument(page.get("title", title), url, "", content)]
-    return []
+ 
+def fetch_wikipedia_article(name, http=http_get_json):
+    """Looks one article up by its exact name, following redirects. [] if there is none."""
+    document = wikipedia_page(name, http)
+    return [] if document is None else [document]
  
  
 def arxiv_keywords(text, limit=5):
@@ -281,6 +301,11 @@ DEFAULT_FETCHERS = {
     SourceType.WEB: fetch_web,
 }
  
+# Sources that can look an article up by its exact name; tried before any search
+DEFAULT_ARTICLE_FETCHERS = {
+    SourceType.WIKIPEDIA: fetch_wikipedia_article,
+}
+ 
  
 # --------------------------------------------------------------------------
 # One sub-question, end to end (blocking; runs in a worker thread)
@@ -302,15 +327,64 @@ def normalize_sources(preferred_sources):
     return sources
  
  
-def passages_of(document, source):
-    pieces = split_into_passages(document.content, DEFAULT_PASSAGE_CHARS)
-    kept = []
-    for piece in pieces:
-        if len(piece.strip()) >= MIN_PASSAGE_CHARS:
-            kept.append(piece)
-        if len(kept) >= PASSAGES_PER_DOCUMENT[source]:
-            break
-    return kept
+def clean_buzz_words(buzz_words):
+    """The buzz words, trimmed, without repeats, at most MAX_BUZZ_WORDS. The first is the main name."""
+    words = []
+    for word in buzz_words or []:
+        word = " ".join(str(word).split())
+        if word and word.lower() not in [kept.lower() for kept in words]:
+            words.append(word)
+    return words[:MAX_BUZZ_WORDS]
+ 
+ 
+def mentions(text, phrase):
+    """True when text contains phrase as whole words, ignoring case, allowing a plural
+    ending, and treating hyphens and spaces alike ("retrieval augmented generation"
+    matches "Retrieval-augmented generation")."""
+    words = [re.escape(word) for word in re.split(r"[\s\-]+", phrase or "") if word]
+    if not words:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + r"[\s\-]+".join(words) + r"(?:s|es)?(?![A-Za-z0-9])"
+    return re.search(pattern, text or "", re.IGNORECASE) is not None
+ 
+ 
+def passages_of(document, source, buzz_words=()):
+    """The passages of a document worth saving, at most PASSAGES_PER_DOCUMENT[source],
+    in their original order. With buzz words, the best-matching passages anywhere in
+    the document are chosen, not just the first ones: 3 points for the main name and 1
+    for each other buzz word. If none matches, or there are no buzz words, the first
+    passages are kept."""
+    pieces = [piece for piece in split_into_passages(document.content, DEFAULT_PASSAGE_CHARS)
+              if len(piece.strip()) >= MIN_PASSAGE_CHARS]
+    limit = PASSAGES_PER_DOCUMENT[source]
+    if not buzz_words:
+        return pieces[:limit]
+    main, others = buzz_words[0], buzz_words[1:]
+    scores = []
+    for position, piece in enumerate(pieces):
+        score = 3 * mentions(piece, main) + sum(mentions(piece, word) for word in others)
+        if score > 0:
+            scores.append((score, position))
+    if not scores:
+        return pieces[:limit]
+    best = sorted(scores, key=lambda item: (-item[0], item[1]))[:limit]
+    return [pieces[position] for _, position in sorted(best, key=lambda item: item[1])]
+ 
+ 
+def search_steps(source, text, buzz_words, fetchers, article_fetchers):
+    """(step name, fetch, query, gated) in the order a source is tried: the main name as
+    an exact article (sources that can look one up), then the buzz words, then the full
+    sub-question. A gated step's documents must mention the main name; the exact
+    article is the one the Manager named, so it is not gated."""
+    steps = []
+    main = buzz_words[0] if buzz_words else ""
+    if main and source in article_fetchers:
+        steps.append(("article name", article_fetchers[source], main, False))
+    if source in fetchers:
+        if buzz_words:
+            steps.append(("buzz words", fetchers[source], " ".join(buzz_words), True))
+        steps.append(("sub-question", fetchers[source], text, True))
+    return steps
  
  
 def register_sub_question(store, question_id, sub_question_id, text):
@@ -328,34 +402,31 @@ def register_sub_question(store, question_id, sub_question_id, text):
         pass  # UNIQUE (question_id, plan_number): already registered
  
  
-def run_search(store, question_id, sub_question_id, text, preferred_sources, fetchers=None):
-    """Searches one sub-question, saves its passages, and returns its SubQuestionEvidence."""
+def run_search(store, question_id, sub_question_id, text, preferred_sources, buzz_words=(),
+               fetchers=None, article_fetchers=None):
+    """Searches one sub-question, saves its passages, and returns its SubQuestionEvidence.
+ 
+    Each source is tried in the order search_steps gives and stops at the first step
+    that finds something usable. A document from a search is used only if it
+    mentions the main name (the first buzz word), so an off-topic article is never
+    saved; Wikipedia keeps one article, the other sources what passed.
+    """
     if fetchers is None:
         fetchers = DEFAULT_FETCHERS
+    if article_fetchers is None:
+        article_fetchers = {}
+    buzz_words = clean_buzz_words(buzz_words)
+    main = buzz_words[0] if buzz_words else ""
     register_sub_question(store, question_id, sub_question_id, text)
  
     evidence_ids = []
     errors = []
     tried = []
  
-    def search_source(source):
-        tried.append(source)
-        fetch = fetchers.get(source)
-        if fetch is None:
-            errors.append(f"{source.value}: no fetcher configured")
-            return
-        try:
-            documents = fetch(text)
-        except FetchError as error:
-            errors.append(f"{source.value}: {short_error(error)}")
-            return
-        except Exception as error:  # a bug in a fetcher must not take the run down
-            logger.exception("%s fetcher crashed", source.value)
-            errors.append(f"{source.value}: unexpected {type(error).__name__}: {short_error(error)}")
-            return
+    def save(documents, source):
         retrieved_at = utc_now()
         for document in documents:
-            for passage in passages_of(document, source):
+            for passage in passages_of(document, source, buzz_words):
                 if len(evidence_ids) >= MAX_EVIDENCE_PER_SUB_QUESTION:
                     return
                 record = EvidenceRecord(
@@ -368,6 +439,35 @@ def run_search(store, question_id, sub_question_id, text, preferred_sources, fet
                     source_type=source,
                 )
                 evidence_ids.append(store.add_evidence(question_id, record))
+ 
+    def search_source(source):
+        tried.append(source)
+        steps = search_steps(source, text, buzz_words, fetchers, article_fetchers)
+        if not steps:
+            errors.append(f"{source.value}: no fetcher configured")
+            return
+        for step, fetch, query, gated in steps:
+            try:
+                documents = list(fetch(query))
+            except FetchError as error:
+                # the service itself failed, so its later steps would too
+                errors.append(f"{source.value}: {short_error(error)}")
+                return
+            except Exception as error:  # a bug in a fetcher must not take the run down
+                logger.exception("%s fetcher crashed", source.value)
+                errors.append(f"{source.value}: unexpected {type(error).__name__}: {short_error(error)}")
+                return
+            if gated and main:
+                documents = [document for document in documents if mentions(document.content, main)]
+            if source == SourceType.WIKIPEDIA:
+                documents = documents[:1]
+            if documents:
+                logger.info("%s, sub-question %s: %s step used %s", source.value, sub_question_id,
+                            step, [document.title for document in documents])
+                save(documents, source)
+                return
+            logger.info("%s, sub-question %s: %s step found nothing that mentions %r",
+                        source.value, sub_question_id, step, main)
  
     for source in normalize_sources(preferred_sources):
         if len(evidence_ids) >= MAX_EVIDENCE_PER_SUB_QUESTION:
@@ -409,8 +509,12 @@ def failed(sub_question_id, message):
 SEARCH_INSTRUCTION = (
     "\n\nSearching:\n"
     "7. After planning, call search_sub_question once for each sub-question in "
-    "your plan, with its sub_question_id, its text and its preferred_sources. "
-    "Search at most LIMIT sub-questions and never the same one twice.\n"
+    "your plan, with its sub_question_id, its text, its preferred_sources and "
+    "2 to 5 buzz_words. The first buzz word is the main topic's full name, as "
+    "Wikipedia would title its article, never an abbreviation (\"User Datagram "
+    "Protocol\", not \"UDP\"); the others are the key terms a search engine "
+    "needs to find the answer. Search at most LIMIT sub-questions and never the "
+    "same one twice, unless the tool says it was not searched.\n"
     "8. The tool returns a status and evidence ids only. You do not read or "
     "judge evidence. A status of empty or failed is recorded for the report, so "
     "do not search again or rephrase to get a different answer.\n"
@@ -427,9 +531,13 @@ class SearchTool:
     call waits for the first one instead of fetching and storing twice.
     """
  
-    def __init__(self, store=None, fetchers=None):
+    def __init__(self, store=None, fetchers=None, article_fetchers=None):
         self.store = store if store is not None else EvidenceStore()
         self.fetchers = fetchers if fetchers is not None else DEFAULT_FETCHERS
+        if article_fetchers is None:
+            # Caller-supplied fetchers (tests) get no real lookups unless they ask
+            article_fetchers = DEFAULT_ARTICLE_FETCHERS if fetchers is None else {}
+        self.article_fetchers = article_fetchers
         self.registry = {}
  
     # ----- callbacks -----
@@ -461,7 +569,7 @@ class SearchTool:
  
     # ----- the tool body -----
  
-    async def search(self, sub_question_id, text, preferred_sources, tool_context):
+    async def search(self, sub_question_id, text, preferred_sources, buzz_words, tool_context):
         question_id = tool_context.state.get(STATE_QUESTION_ID)
         if question_id is None:
             raise RuntimeError(
@@ -471,12 +579,19 @@ class SearchTool:
         try:
             sub_question_id = int(sub_question_id)
         except (TypeError, ValueError):
-            return failed(1, f"sub_question_id must be an integer, got {sub_question_id!r}").model_dump(mode="json")
+            message = f"sub_question_id must be an integer, got {sub_question_id!r}"
+            return failed(1, NOT_SEARCHED_PREFIX + message).model_dump(mode="json")
         if sub_question_id < 1:
-            return failed(1, "sub_question_id must be 1 or more").model_dump(mode="json")
+            message = "sub_question_id must be 1 or more"
+            return failed(1, NOT_SEARCHED_PREFIX + message).model_dump(mode="json")
         text = (text or "").strip()
         if len(text) < 5:
-            return failed(sub_question_id, "sub-question text is too short to search").model_dump(mode="json")
+            return failed(sub_question_id, NOT_SEARCHED_PREFIX + "sub-question text is too short to search"
+                          ).model_dump(mode="json")
+        buzz_words = clean_buzz_words(buzz_words)
+        if not buzz_words:
+            return failed(sub_question_id, NOT_SEARCHED_PREFIX + "buzz_words is empty; call again with the "
+                          "main topic's full name first").model_dump(mode="json")
  
         runs = self.registry.setdefault(question_id, {})
         task = runs.get(sub_question_id)
@@ -486,11 +601,12 @@ class SearchTool:
                 # Not recorded: the plan will be capped to `limit` anyway
                 return failed(
                     sub_question_id,
-                    f"search limit reached: at most {limit} sub-questions are searched per question",
+                    NOT_SEARCHED_PREFIX + f"search limit reached: at most {limit} sub-questions are "
+                    "searched per question",
                 ).model_dump(mode="json")
             task = asyncio.ensure_future(asyncio.to_thread(
                 run_search, self.store, question_id, sub_question_id, text,
-                preferred_sources, self.fetchers,
+                preferred_sources, buzz_words, self.fetchers, self.article_fetchers,
             ))
             runs[sub_question_id] = task
         try:
@@ -502,7 +618,8 @@ class SearchTool:
  
     def as_function_tool(self):
         async def search_sub_question(
-            sub_question_id: int, text: str, preferred_sources: list[str], tool_context
+            sub_question_id: int, text: str, preferred_sources: list[str], buzz_words: list[str],
+            tool_context
         ) -> dict:
             """Searches the given sources for one sub-question and stores the passages.
  
@@ -510,12 +627,14 @@ class SearchTool:
               sub_question_id: The sub-question's id from your plan (1, 2, 3...).
               text: The sub-question text, exactly as in your plan.
               preferred_sources: Sources to search, from wikipedia, arxiv and web.
+              buzz_words: 2 to 5 search terms. The first is the main topic's full
+                name as Wikipedia would title its article, never an abbreviation.
  
             Returns:
               sub_question_id, status (found, empty or failed), evidence_ids, and
               error (what went wrong, if anything).
             """
-            return await self.search(sub_question_id, text, preferred_sources, tool_context)
+            return await self.search(sub_question_id, text, preferred_sources, buzz_words, tool_context)
  
         return FunctionTool(search_sub_question)
  
@@ -543,7 +662,7 @@ def as_callback_list(existing):
     return [existing]
  
  
-def attach_search(manager, store=None, fetchers=None):
+def attach_search(manager, store=None, fetchers=None, article_fetchers=None):
     """Gives the Manager the search tool, its instructions, and the two callbacks around it.
  
     register_question runs before the Manager's own before_agent_callback.
@@ -551,7 +670,7 @@ def attach_search(manager, store=None, fetchers=None):
     capped plan. Returns the SearchTool, whose store the pipeline should also
     read evidence from.
     """
-    search_tool = SearchTool(store=store, fetchers=fetchers)
+    search_tool = SearchTool(store=store, fetchers=fetchers, article_fetchers=article_fetchers)
     manager.tools = list(manager.tools or []) + [search_tool.as_function_tool()]
     if isinstance(manager.instruction, str):
         manager.instruction += SEARCH_INSTRUCTION.replace("LIMIT", str(max_sub_questions()))
@@ -574,6 +693,8 @@ def main():
     parser = argparse.ArgumentParser(description="Search one sub-question into a scratch evidence store.")
     parser.add_argument("--live", metavar="SUB_QUESTION",
                         help="hit the real sources (network needed, no API key)")
+    parser.add_argument("--buzz", default="",
+                        help="comma-separated buzz words, main name first (default: none)")
     parser.add_argument("--sources", default="wikipedia,arxiv",
                         help="comma-separated preferred sources (default wikipedia,arxiv)")
     args = parser.parse_args()
@@ -582,8 +703,10 @@ def main():
         store = EvidenceStore(Path(scratch) / "demo.db")
         question_id = store.add_question("Demo question")
  
+        article_fetchers = {}
         if args.live:
             fetchers = DEFAULT_FETCHERS
+            article_fetchers = DEFAULT_ARTICLE_FETCHERS
             text = args.live
         else:
             # Canned fetchers, so the demo runs offline: wikipedia finds something,
@@ -600,7 +723,8 @@ def main():
             text = "What is a transformer model?"
  
         sources = [name.strip() for name in args.sources.split(",") if name.strip()]
-        result = run_search(store, question_id, 1, text, sources, fetchers)
+        buzz_words = [word.strip() for word in args.buzz.split(",") if word.strip()]
+        result = run_search(store, question_id, 1, text, sources, buzz_words, fetchers, article_fetchers)
         print(f"\nSub-question: {text}")
         print("Returned to the Manager:", json.dumps(result.model_dump(mode="json"), indent=1))
         for row in store.read_evidence(result.evidence_ids):

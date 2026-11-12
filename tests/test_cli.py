@@ -11,7 +11,9 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai import errors as genai_errors
 from google.genai import types
 
+import pipeline
 from manager_agent import build_manager_agent
+from rate_limit import DailyQuotaExceeded
 from schemas import STATE_DRAFT
 from schemas import STATE_PLAN
 from schemas import STATE_VERDICT
@@ -68,11 +70,15 @@ def fake_sources(evidence_ids):
 class ScriptedLlm(BaseLlm):
     reply: str = ""
     error_code: int = 0
+    daily_quota_used: bool = False
 
     async def generate_content_async(self, llm_request, stream=False):
+        if self.daily_quota_used:
+            raise DailyQuotaExceeded("Gemini free-tier daily request quota is used up (scripted)")
         if self.error_code:
-            status = {429: "RESOURCE_EXHAUSTED", 404: "NOT_FOUND"}[self.error_code]
-            raise genai_errors.ClientError(self.error_code, {"error": {
+            status = {429: "RESOURCE_EXHAUSTED", 404: "NOT_FOUND", 503: "UNAVAILABLE"}[self.error_code]
+            error_class = genai_errors.ServerError if self.error_code >= 500 else genai_errors.ClientError
+            raise error_class(self.error_code, {"error": {
                 "code": self.error_code, "message": "scripted error", "status": status}})
         yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text=self.reply)]))
 
@@ -128,6 +134,7 @@ def test_run_counts_model_calls_and_records_the_plan():
 @pytest.mark.parametrize("code, expected", [
     (429, "free tier refused the request (429"),
     (404, "is not available to this API key (404)"),
+    (503, "Gemini is overloaded right now (503). That's on Google's side"),
 ])
 def test_model_errors_print_a_plain_message(monkeypatch, capsys, code, expected):
     agent = manager_with(ScriptedLlm(model="scripted", error_code=code))
@@ -138,4 +145,32 @@ def test_model_errors_print_a_plain_message(monkeypatch, capsys, code, expected)
     captured = capsys.readouterr()
     assert expected in captured.out
     assert "Model calls: 1" in captured.out
+    assert "Traceback" not in captured.err
+
+
+# The pipeline without Search and without search results, so the Synthesizer
+# stops for lack of evidence, as a run where Search found nothing would
+def test_a_run_with_no_evidence_prints_a_plain_message(monkeypatch, capsys):
+    agent = pipeline.build_pipeline(evidence_reader=fake_sources, search=False)
+    agent.sub_agents[0].model = ScriptedLlm(model="scripted", reply=json.dumps(PLAN))
+    monkeypatch.setattr(cli, "build_root_agent", lambda: agent)
+    with pytest.raises(SystemExit) as stopped:
+        cli.main([QUESTION])
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert "The run stopped before writing a report: " in captured.out
+    assert "Search has not run" in captured.out
+    # The counter also counts the Synthesizer call its evidence check blocked
+    assert "Model calls: 2" in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_a_used_up_daily_quota_prints_a_plain_message(monkeypatch, capsys):
+    agent = manager_with(ScriptedLlm(model="scripted", daily_quota_used=True))
+    monkeypatch.setattr(cli, "build_root_agent", lambda: agent)
+    with pytest.raises(SystemExit) as stopped:
+        cli.main([QUESTION])
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert "daily request quota is used up" in captured.out
     assert "Traceback" not in captured.err
