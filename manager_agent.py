@@ -1,15 +1,17 @@
 # Manager agent. Splits one research question into sub-questions,
 # capped at max_sub_questions(), which reads SP201_MAX_SUB_QUESTIONS and
-# clamps it to [1, ABSOLUTE_MAX_SUB_QUESTIONS]. No tools are attached yet;
-# AgentTool(search_agent) is added in Step 2, once the output_schema vs
-# AgentTool constraint on gemini-3.5-flash-lite is settled in its own ADR.
-# Step 2 must read the plan from state[STATE_PLAN], not from the Manager's
+# clamps it to [1, ABSOLUTE_MAX_SUB_QUESTIONS]. Search is attached by
+# pipeline.build_pipeline through search_agent.attach_search, as the
+# search_sub_question tool; on an AI Studio key ADK returns the plan through
+# set_model_response, since output_schema and tools can't be paired natively.
+# Search reads the plan from state[STATE_PLAN], not from the Manager's
 # last message. The cap is applied in enforce_sub_question_cap, which only
 # rewrites state; the model's original uncapped reply stays in history.
 import os
 
 from dotenv import load_dotenv
 from google.adk.agents import LlmAgent
+from google.genai import types
 
 from schemas import ABSOLUTE_MAX_SUB_QUESTIONS
 from schemas import ManagerPlan
@@ -54,8 +56,10 @@ def build_instruction(limit):
     sources = ", ".join(source_names())
     question_slot = "{" + STATE_USER_QUESTION + "}"
     return (
-        "You are the Manager of a research pipeline. You plan; you do not "
-        "search, write prose, or judge whether anything is true.\n"
+        "You are the Manager of a research pipeline. You plan the "
+        "sub-questions and send each one to Search with the "
+        "search_sub_question tool. You never read what Search finds, write "
+        "prose, or judge whether anything is true.\n"
         "\n"
         f"Research question: {question_slot}\n"
         "\n"
@@ -74,7 +78,11 @@ def build_instruction(limit):
         "or technical research, and web only as a fallback when neither "
         "is likely to have it.\n"
         "5. Copy the research question into user_question unchanged.\n"
-        "6. Return only the JSON object. No commentary."
+        "6. IMPORTANT: you must call search_sub_question once for every "
+        "sub-question in your plan before you hand it in. The writer can only "
+        "cite what Search saves, so a sub-question you don't search is left "
+        "out of the report. Your final answer is only the JSON object, with "
+        "no commentary."
     )
 
 # Reads the question submitted by the user from session state
@@ -119,7 +127,13 @@ def enforce_sub_question_cap(callback_context):
     record_plan(callback_context.state, plan)
     return None
 
-# Builds the Manager LlmAgent. No tools yet; see the note at the top of the file.
+# How much Gemini reasons before it answers. Flash-Lite's default is minimal;
+# Google advises medium or high for agents that call tools, and the Manager
+# splits the question and picks Search's buzz words before it searches.
+# Thinking costs tokens, not requests.
+MANAGER_THINKING_LEVEL = types.ThinkingLevel.MEDIUM
+
+# Builds the Manager LlmAgent. Search is attached by the pipeline; see the note at the top of the file.
 def build_manager_agent():
     limit = max_sub_questions()
     return LlmAgent(
@@ -129,6 +143,9 @@ def build_manager_agent():
         instruction=build_instruction(limit),
         output_schema=ManagerPlan,
         output_key=STATE_PLAN,
+        generate_content_config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level=MANAGER_THINKING_LEVEL),
+        ),
         after_model_callback=count_model_call,
         after_agent_callback=enforce_sub_question_cap,
     )
