@@ -15,6 +15,7 @@
 # Evidence reader. build_synthesizer_agent takes any function from a list of
 # evidence IDs to StoredEvidence rows. The default is EvidenceStore().read_evidence
 # (evidence_store.py, SDD 6.2).
+import logging
 import re
 
 from dotenv import load_dotenv
@@ -36,6 +37,8 @@ from schemas import STATE_PLAN
 from schemas import STATE_SEARCH_RESULTS
 from schemas import STATE_VERDICT
 from schemas import is_revision
+
+logger = logging.getLogger(__name__)
 
 SYNTHESIZER_AGENT_NAME = "synthesizer"
 SYNTHESIZER_DESCRIPTION = (
@@ -247,15 +250,31 @@ def make_inject_evidence(evidence_reader):
     return inject_evidence
 
 # ADK after_agent_callback: re-validates the draft ADK wrote under STATE_DRAFT and
-# rejects any citation of evidence Search did not store (req. 3.4.2, 3.7.2). A bad
-# draft raises here, so nothing invalid is written back.
+# writes it back as plain JSON (req. 3.7.2). A malformed draft still raises, so
+# nothing invalid is written back. A claim that cites an evidence ID Search did not
+# return does not raise: the claim is kept as written and a warning is logged. The
+# Fact-Checker then marks it unsupported, because the record it cites does not
+# exist (req. 3.5.2).
 def check_draft(callback_context):
     raw_draft = callback_context.state.get(STATE_DRAFT)
     if raw_draft is None:
         return None
     draft = parse_state_value(raw_draft, DraftReport)
     results = read_search_results(callback_context.state)
-    draft.validate_against(results.all_evidence_ids())
+    known = set(results.all_evidence_ids())
+    unknown_ids = set()
+    flagged_claims = []
+    for claim in draft.all_claims():
+        missing = set(claim.evidence_ids) - known
+        if missing:
+            unknown_ids.update(missing)
+            flagged_claims.append(claim.claim_number)
+    if unknown_ids:
+        logger.warning(
+            "Synthesizer draft cites evidence ids Search did not return: %s (claims %s). "
+            "Keeping the draft; the Fact-Checker should mark these claims unsupported.",
+            sorted(unknown_ids), flagged_claims,
+        )
     callback_context.state[STATE_DRAFT] = draft.model_dump(mode="json")
     return None
 

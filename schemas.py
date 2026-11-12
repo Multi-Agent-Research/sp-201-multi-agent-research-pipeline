@@ -55,6 +55,7 @@ def loop_max_iterations() -> int:
 # --------------------------------------------------------------------------
 
 STATE_USER_QUESTION = "user_question"
+STATE_QUESTION_ID = "question_id"       # int; the evidence store question_id for this run
 STATE_PLAN = "manager_plan"             # ManagerPlan
 STATE_SEARCH_RESULTS = "search_results"  # SearchResults
 STATE_DRAFT = "draft_report"            # DraftReport
