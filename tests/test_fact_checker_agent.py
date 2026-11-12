@@ -250,10 +250,14 @@ def test_3_6_4_rejects_duplicate_claim_checks():
         verify_draft(make_verdict([make_check(1, "supported"), make_check(1, "supported")],
                                   result="pass"))
 
-def test_3_5_2_rejects_draft_citing_unknown_evidence_id():
-    with pytest.raises(ValueError):
-        verify_draft(make_verdict([make_check(1, "supported")], result="pass"),
-                     draft=make_draft([1], evidence_ids=[99]), known_evidence_ids=[1, 2])
+def test_3_5_2_flags_claim_citing_unknown_evidence_id():
+    verdict = verify_draft(make_verdict([make_check(1, "supported")], result="pass"),
+                           draft=make_draft([1], evidence_ids=[99]), known_evidence_ids=[1, 2])
+    assert verdict.result == "fail"
+    assert verdict.checks[0].verdict.value == "unsupported"
+    assert "99" in verdict.checks[0].reason
+    assert verdict.flagged_claim_numbers() == [1]
+    assert "claim 1" in verdict.feedback
 
 
 # Flagged claims and support score (3.6.5, 3.6.7)
@@ -332,9 +336,20 @@ def test_3_5_2_each_cited_passage_appears_once():
     message = build_data_message(draft, rows)
     assert message.count('<untrusted_evidence id="1"') == 1
 
-def test_3_5_2_missing_evidence_fails_closed():
-    with pytest.raises(EvidenceError):
-        load_cited_evidence([1, 2], reader_for([make_row(1)]))
+def test_3_5_2_missing_evidence_is_left_out_of_prompt():
+    draft = parse_draft({
+        "title": "T", "summary": "S",
+        "sections": [{"heading": "H", "claims": [
+            make_claim(1, [1]),
+            make_claim(2, [2]),
+        ]}],
+    })
+    rows = load_cited_evidence([1, 2], reader_for([make_row(1)]))
+    assert list(rows.keys()) == [1]
+    message = build_data_message(draft, rows)
+    assert '<untrusted_evidence id="1"' in message
+    assert 'id="2"' not in message
+    assert '<claim number="2" cites="2">' in message
 
 def test_3_7_4_callback_replaces_the_contents_with_the_data_message():
     state = {STATE_DRAFT: make_draft([1])}
@@ -428,8 +443,10 @@ def test_3_7_2_after_agent_callback_checks_search_results_ids():
         STATE_SEARCH_RESULTS: {"results": [
             {"sub_question_id": 1, "status": "found", "evidence_ids": [1, 2], "error": ""}]},
     }
-    with pytest.raises(ValueError):
-        enforce_verdict_rules(FakeCallbackContext(state))
+    enforce_verdict_rules(FakeCallbackContext(state))
+    assert state[STATE_VERDICT]["result"] == "fail"
+    assert state[STATE_VERDICT]["checks"][0]["verdict"] == "unsupported"
+    assert "claim 1" in state[STATE_FEEDBACK]
 
 def test_3_7_2_after_agent_callback_skips_when_no_verdict():
     state = {}
