@@ -22,8 +22,9 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 from evidence_store import EvidenceStore
-from manager_agent import build_manager_agent
 from manager_agent import get_model_id
+from pipeline import build_pipeline
+from rate_limit import DailyQuotaExceeded
 from schemas import STATE_DRAFT
 from schemas import STATE_PLAN
 from schemas import STATE_USER_QUESTION
@@ -32,6 +33,7 @@ from schemas import DraftReport
 from schemas import FactCheckVerdict
 from schemas import ManagerPlan
 from schemas import build_final_report
+from synthesizer_agent import EvidenceError
 
 APP_NAME = "sp201-cli"
 USER_ID = "cli"
@@ -49,12 +51,10 @@ class ModelCallCounter(BasePlugin):
         return None
 
 
-# Builds the agent the CLI runs. The full pipeline is pipeline.build_pipeline(),
-# but Search is not wired into the Manager yet, so a full run would stop at the
-# Synthesizer with no evidence. Until Search lands this stays the Manager on its
-# own; then return pipeline.build_pipeline() here instead.
+# Builds the agent the CLI runs: the full pipeline, with Search attached to the
+# Manager and every model call rate-limited
 def build_root_agent():
-    return build_manager_agent()
+    return build_pipeline()
 
 
 # Prints one line per agent step: always the agent's name when it starts
@@ -82,13 +82,17 @@ class PipelineStopped(Exception):
         self.message = message
 
 
-# Turns a model error into a plain message. Only the two errors a new user
-# hits are explained: the free-tier limit and a model the key can't use.
+# Turns a model error into a plain message. Only the errors a user actually
+# hits are explained: the free-tier limit, a model the key can't use, and
+# Google's servers being overloaded once the retries have run out.
 def explain_model_error(code, message):
     text = f"{code} {message}"
     if "429" in text or "RESOURCE_EXHAUSTED" in text:
         return ("The Gemini free tier refused the request (429: too many requests). "
                 "Wait a minute and try again, or set SP201_MODEL_ID to a model with a higher limit.")
+    if "503" in text or "UNAVAILABLE" in text:
+        return ("Gemini is overloaded right now (503). That's on Google's side; "
+                "wait a minute or two and try again.")
     if "404" in text or "NOT_FOUND" in text:
         return (f"The model {get_model_id()} is not available to this API key (404). "
                 "Set SP201_MODEL_ID in .env to a model your key can use.")
@@ -234,5 +238,10 @@ def main(argv=None):
         stop(message, counter)
     except PipelineStopped as error:
         stop(explain_model_error(error.code, error.message) or str(error), counter)
+    except EvidenceError as error:
+        # Search found nothing to cite, so no report can be written
+        stop(f"The run stopped before writing a report: {error}", counter)
+    except DailyQuotaExceeded as error:
+        stop(str(error), counter)
     print("")
     print(render(state, counter.calls))
