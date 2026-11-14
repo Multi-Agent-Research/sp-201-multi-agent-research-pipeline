@@ -8,7 +8,7 @@ python-dotenv==1.2.4
 
 # Retrieval libraries imported by search_agent.py
 wikipedia==1.4.0
-duckduckgo-search==8.1.1
+ddgs==9.16.1
 
 # Tests: python -m pytest tests
 pytest==9.1.1
