@@ -371,6 +371,12 @@ def test_3_5_2_instruction_names_every_verdict():
     assert ("supported, partially_supported, unsupported, contradicted, not_verifiable"
             in build_instruction())
 
+def test_3_5_3_a_sentence_about_the_evidence_itself_is_marked_unsupported():
+    # Live runs (2026-11-12) passed "claims" saying what the sources do not contain
+    instruction = build_instruction()
+    assert "A sentence about the evidence or the report itself" in instruction
+    assert "is not a claim about the topic: mark it unsupported" in instruction
+
 
 # Session state and the after_agent callback (3.4.2, 3.7.2)
 

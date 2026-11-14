@@ -138,9 +138,12 @@ def format_sub_question(result, sub_question, rows_by_id):
         for evidence_id in result.evidence_ids:
             lines.append(format_evidence(rows_by_id[evidence_id]))
     else:
+        # Not "do not answer it": another sub-question's evidence often holds the answer
+        # (Q02 and Q05 lost their points that way on 2026-11-13)
         lines.append(
-            f"No evidence is available for this sub-question (search {result.status.value}). "
-            "Do not answer it. Say in the summary that it could not be researched."
+            f"Search found nothing under this sub-question itself (search {result.status.value}). "
+            "If a passage under another sub-question answers it, answer it from that passage. "
+            "If none does, give it no claims and say in the summary that it could not be answered."
         )
     lines.append("</sub_question>")
     return "\n".join(lines)
@@ -313,12 +316,27 @@ def build_instruction():
         "claim seems obvious.\n"
         "5. If sources disagree, give each side as its own cited claim. Do not "
         "pick a winner.\n"
-        "6. A sub-question with no evidence gets no claims. Name it in the "
-        "summary as one that could not be researched.\n"
+        "6. The evidence is one pool for the whole question. A passage listed "
+        "under one sub-question may answer another: use it wherever it answers, "
+        "citing its id. A sub-question that no passage answers gets no claims; "
+        "name it in the summary as one that could not be answered.\n"
         "7. Number claims from 1 upward in order of appearance. Each number is "
         "used once in the report.\n"
         "8. Group claims into sections by sub-question or theme, each with a "
-        "short heading. Keep the report short and focused on the question.\n"
+        "short heading. Answer every part of each sub-question with the specific "
+        "facts the evidence gives: names, dates, numbers and places. A part often "
+        "needs several claims: state each fact a passage gives that answers it, "
+        "not only the first one you find. A date or number in a passage that "
+        "answers the question belongs in the report. Stay on the question: no "
+        "background it did not ask for.\n"
+        "9. Every claim states a fact about the topic, taken from a passage. Never "
+        "write a claim about the evidence or the report itself, such as what the "
+        "sources do or do not say. If part of the question is not answered by the "
+        "evidence, say so in the summary only.\n"
+        "10. The summary says which parts of the question the claims answer and "
+        "names each part they do not. A part counts as answered when any claim "
+        "answers it, wherever that claim's evidence was listed. Never say that "
+        "every part was answered when a part has no claim.\n"
         "\n"
         "When MODE is revision, you also get a revision request and the previous "
         "draft. Then:\n"
@@ -335,6 +353,12 @@ def build_instruction():
         "Return only the JSON object. No commentary."
     )
 
+# How much Gemini reasons before it writes, as for the Manager (manager_agent.py).
+# On minimal thinking, the default, the 2026-11-13 run left out about 12 of the 78
+# expected facts that were in the evidence it was given. Thinking costs tokens, not
+# requests.
+SYNTHESIZER_THINKING_LEVEL = types.ThinkingLevel.MEDIUM
+
 # Builds the Synthesizer LlmAgent. No tools: the evidence is supplied by the callback.
 def build_synthesizer_agent(evidence_reader=None):
     if evidence_reader is None:
@@ -347,6 +371,9 @@ def build_synthesizer_agent(evidence_reader=None):
         include_contents="none",
         output_schema=DraftReport,
         output_key=STATE_DRAFT,
+        generate_content_config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level=SYNTHESIZER_THINKING_LEVEL),
+        ),
         before_model_callback=make_inject_evidence(evidence_reader),
         after_model_callback=count_model_call,
         after_agent_callback=check_draft,

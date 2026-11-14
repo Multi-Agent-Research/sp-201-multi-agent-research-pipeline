@@ -335,6 +335,9 @@ def build_instruction():
         "unsupported or contradicted. Otherwise set result to fail and write "
         "feedback naming each failing claim and what is wrong with it. A fail "
         "with empty feedback is rejected.\n"
+        "7. A sentence about the evidence or the report itself, such as what the "
+        "sources do or do not contain, is not a claim about the topic: mark it "
+        "unsupported, with the reason that it is not a claim about the topic.\n"
         "\n"
         "Return only the JSON object. No commentary."
     )
