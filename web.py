@@ -78,7 +78,10 @@ SECURITY_HEADERS = {
     ),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
+    # same-origin, not no-referrer: under no-referrer a browser sends "Origin: null"
+    # on the page's own form post, and origin_ok refuses it. Outside links still
+    # carry rel="noreferrer", so nothing leaks to other sites.
+    "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
 

@@ -7,6 +7,7 @@ never the system instruction. Persistence is not this module's job;
 EvidenceStore.save_claims handles it.
 """
 
+import json
 import re
 
 from dotenv import load_dotenv
@@ -22,6 +23,7 @@ from manager_agent import get_model_id
 from schemas import ClaimCheck
 from schemas import DraftReport
 from schemas import FactCheckVerdict
+from schemas import PASS_ALLOWS_PARTIAL
 from schemas import STATE_DRAFT
 from schemas import STATE_FEEDBACK
 from schemas import STATE_SEARCH_RESULTS
@@ -47,6 +49,12 @@ DELIMITER_PATTERN = re.compile(
 
 # Reason recorded for a claim the model returned no verdict for
 NOT_CHECKED_REASON = "The Fact-Checker returned no verdict for this claim."
+
+# Added to the reason when a verdict that needs a restatement came without one
+NO_RESTATEMENT_NOTE = "No restatement was given, so the claim is treated as unsupported."
+
+# Used when the model fails a draft without naming a failing claim
+NO_FEEDBACK_NOTE = "The Fact-Checker failed the draft without saying why."
 
 
 class EvidenceError(ValueError):
@@ -254,6 +262,104 @@ def verify_draft(raw_verdict, draft=None, known_evidence_ids=None):
     return verdict
 
 
+def blocking_verdicts():
+    """Verdict values that stop a draft from passing (mirrors FactCheckVerdict)."""
+    blocking = {Verdict.UNSUPPORTED.value, Verdict.CONTRADICTED.value}
+    if not PASS_ALLOWS_PARTIAL:
+        blocking.add(Verdict.PARTIALLY_SUPPORTED.value)
+    return blocking
+
+
+def repair_verdict_json(data):
+    """Make a raw verdict follow FactCheckVerdict's rules, always toward failing.
+
+    Gemini's response schema enforces the JSON shape but not the rules that tie
+    fields together, and ADK validates the output before any after_agent_callback
+    runs, so one broken rule used to stop the whole run with a traceback. Repaired
+    here instead: a partially_supported or contradicted check with no restatement
+    becomes unsupported, a second check for the same claim is dropped, a pass that
+    still has a failing claim becomes a fail, and a fail with no feedback gets
+    feedback naming each failing claim. Returns the data and whether it changed.
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        return data, False
+
+    needs_restatement = {Verdict.PARTIALLY_SUPPORTED.value, Verdict.CONTRADICTED.value}
+    changed = False
+    seen = set()
+    checks = []
+    repaired = []
+    for check in data["checks"]:
+        if not isinstance(check, dict):
+            checks.append(check)
+            continue
+        number = check.get("claim_number")
+        if number in seen:
+            changed = True
+            continue
+        seen.add(number)
+        restatement = str(check.get("restatement") or "").strip()
+        if check.get("verdict") in needs_restatement and not restatement:
+            reason = str(check.get("reason") or "").strip()
+            check = dict(check)
+            check["verdict"] = Verdict.UNSUPPORTED.value
+            check["reason"] = f"{reason} {NO_RESTATEMENT_NOTE}".strip()
+            check["restatement"] = ""
+            repaired.append(str(number))
+            changed = True
+        checks.append(check)
+
+    blocking = blocking_verdicts()
+    failing = [c for c in checks if isinstance(c, dict) and c.get("verdict") in blocking]
+    result = data.get("result")
+    feedback = str(data.get("feedback") or "").strip()
+
+    if result == "pass" and failing:
+        result = "fail"
+        changed = True
+    if repaired:
+        label = "claim" if len(repaired) == 1 else "claims"
+        note = f"No restatement was given for {label} {', '.join(repaired)}, so treated as unsupported."
+        feedback = f"{feedback} {note}".strip()
+    if result == "fail" and not feedback:
+        named = [f"Claim {c.get('claim_number')} is {c.get('verdict')}: {c.get('reason', '')}".strip()
+                 for c in failing]
+        feedback = " ".join(named) or NO_FEEDBACK_NOTE
+        changed = True
+
+    repaired_data = dict(data)
+    repaired_data["checks"] = checks
+    repaired_data["result"] = result
+    repaired_data["feedback"] = feedback
+    return repaired_data, changed
+
+
+def repair_verdict_response(callback_context, llm_response):
+    """ADK after_model_callback: repair the verdict before ADK validates it.
+
+    Returns the repaired response, or None to keep the model's response as it
+    is. JSON that does not parse is left alone and still fails closed.
+    """
+    content = llm_response.content
+    if llm_response.partial or content is None or not content.parts:
+        return None
+    text_parts = [part for part in content.parts if part.text and not part.thought]
+    if not text_parts:
+        return None
+    try:
+        data = json.loads("".join(part.text for part in text_parts))
+    except ValueError:
+        return None
+    repaired, changed = repair_verdict_json(data)
+    if not changed:
+        return None
+    kept = [part for part in content.parts if not (part.text and not part.thought)]
+    llm_response.content = types.Content(
+        role=content.role, parts=kept + [types.Part(text=json.dumps(repaired))]
+    )
+    return llm_response
+
+
 def record_verdict(state, verdict):
     """Write the verdict to state, and set or clear revision feedback.
 
@@ -354,7 +460,8 @@ def build_fact_checker_agent(evidence_reader=None):
         output_schema=FactCheckVerdict,
         output_key=STATE_VERDICT,
         before_model_callback=make_inject_evidence(evidence_reader),
-        after_model_callback=count_model_call,
+        # Counts the call, then repairs a verdict that breaks a schema rule
+        after_model_callback=[count_model_call, repair_verdict_response],
         after_agent_callback=enforce_verdict_rules,
     )
 
