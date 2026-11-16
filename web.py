@@ -383,38 +383,38 @@ def work(app, job):
 # ---------------------------------------------------------------------------
 
 STYLE = """
-:root { color-scheme: light; --gold: #fdbb30; --ink: #1a1a1a; --muted: #5f6368; --line: #d9d9d9;
-  --ok: #1a7f37; --flag: #b45309; --bad: #b42318; --link: #1a4f8b; }
-body { margin: 0; background: #fff; color: var(--ink);
-  font: 16px/1.55 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+:root { color-scheme: light; --accent: #be937e; --ink: #1f2526; --muted: #5d6668; --line: #d0cdc5;
+  --ok: #576853; --flag: #b45309; --bad: #b42318; --link: #753f2c; }
+body { margin: 0; background: #ede9e6; color: var(--ink);
+  font: 16px/1.55 Arial, Helvetica, sans-serif; }
 a { color: var(--link); }
-.top { background: #111; color: #fff; border-bottom: 4px solid var(--gold); }
+.top { background: #3b4546; color: #fff; border-bottom: 4px solid var(--accent); }
 .top div { max-width: 46rem; margin: 0 auto; padding: .75rem 1rem; display: flex;
   justify-content: space-between;
   align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .top a { color: #fff; text-decoration: none; font-weight: 700; font-size: 1.3rem; letter-spacing: .02em; }
-.top span { color: var(--gold); font-size: .85rem; }
+.top span { color: #d0cdc5; font-size: .85rem; }
 main { max-width: 46rem; margin: 1.5rem auto 3rem; padding: 0 1rem; }
 h1 { font-size: 1.45rem; margin: 0 0 .4rem; }
-h2 { font-size: 1.1rem; margin-top: 1.75rem; padding-bottom: .2rem; border-bottom: 2px solid var(--gold); }
+h2 { font-size: 1.1rem; margin-top: 1.75rem; padding-bottom: .2rem; border-bottom: 2px solid var(--accent); }
 h3 { font-size: 1rem; margin-bottom: .2rem; }
 label { font-weight: 600; }
-textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; border: 1px solid #b5b5b5;
-  border-radius: 3px; margin-top: .3rem; }
-button { font: inherit; font-weight: 600; padding: .45rem 1.2rem; border: 1px solid #111; border-radius: 3px;
-  background: #111; color: #fff; cursor: pointer; }
-button:hover { background: #333; }
+textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; border: 1px solid #b9b3ad;
+  border-radius: 3px; margin-top: .3rem; background: #fff; }
+button { font: inherit; font-weight: 600; padding: .45rem 1.2rem; border: 1px solid #3b4546;
+  border-radius: 3px; background: #3b4546; color: #fff; cursor: pointer; }
+button:hover { background: #4d585a; }
 .lead { margin-top: 0; }
 .muted { color: var(--muted); font-size: .9rem; }
-.question { border-left: 3px solid #111; padding-left: .8rem; }
-.notice { border: 1px solid var(--line); background: #fafafa; padding: .6rem .8rem; margin: 1rem 0; }
+.question { border-left: 3px solid #3b4546; padding-left: .8rem; }
+.notice { border: 1px solid var(--line); background: #f7f5f3; padding: .6rem .8rem; margin: 1rem 0; }
 .busy { border: 1px solid #e3c26a; background: #fff8e1; padding: .6rem .8rem; margin: 1rem 0; }
 .warning { border: 1px solid var(--flag); background: #fff4e5; padding: .6rem .8rem; margin: 1rem 0;
   font-weight: 600; }
 .error { border: 1px solid var(--bad); background: #fdecea; padding: .6rem .8rem; margin: 1rem 0; }
 .step { font-weight: 600; margin: 1.5rem 0 .4rem; }
-.bar { height: .7rem; background: #ececec; border: 1px solid var(--line); }
-.bar div { height: 100%; background-color: var(--gold);
+.bar { height: .7rem; background: #dcd7d2; border: 1px solid var(--line); }
+.bar div { height: 100%; background-color: var(--accent);
   background-image: linear-gradient(45deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%,
     rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%, transparent);
   background-size: 1rem 1rem; animation: stripes 1.2s linear infinite; }
@@ -424,7 +424,8 @@ button:hover { background: #333; }
 .now { margin: .5rem 0 1rem; }
 table.stats { border-collapse: collapse; width: 100%; margin: 1rem 0 .5rem; }
 table.stats th, table.stats td { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
-table.stats th { background: #f5f5f5; font-size: .8rem; font-weight: 600; color: var(--muted); }
+table.stats td { background: #fff; }
+table.stats th { background: #e2ddd8; font-size: .8rem; font-weight: 600; color: var(--muted); }
 table.stats td { font-size: 1.15rem; font-weight: 700; }
 ul.claims { padding-left: 1.2rem; }
 li.claim { margin: .8rem 0; padding-left: .6rem; border-left: 3px solid transparent; }
