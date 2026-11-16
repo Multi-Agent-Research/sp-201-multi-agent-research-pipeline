@@ -5,15 +5,20 @@
 # replaced by a reader built from a dict.
 
 import copy
+import json
 from collections import namedtuple
 
 import pytest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions.state import State
+from google.genai import types
 from pydantic import ValidationError
 
 from fact_checker_agent import DEFAULT_MODEL_ID
 from fact_checker_agent import FACT_CHECKER_AGENT_NAME
 from fact_checker_agent import MAX_PASSAGE_CHARS
+from fact_checker_agent import NO_FEEDBACK_NOTE
+from fact_checker_agent import NO_RESTATEMENT_NOTE
 from fact_checker_agent import NOT_CHECKED_REASON
 from fact_checker_agent import STATE_MODEL_CALLS
 from fact_checker_agent import EvidenceError
@@ -28,6 +33,8 @@ from fact_checker_agent import make_inject_evidence
 from fact_checker_agent import parse_draft
 from fact_checker_agent import read_draft_report
 from fact_checker_agent import record_verdict
+from fact_checker_agent import repair_verdict_json
+from fact_checker_agent import repair_verdict_response
 from fact_checker_agent import truncate_passage
 from fact_checker_agent import verify_draft
 from schemas import DraftReport
@@ -476,6 +483,89 @@ def test_3_11_1_model_id_uses_default_and_environment(monkeypatch):
     assert build_fact_checker_agent().model == "gemini-9.9-test"
 
 
+# Repairing a verdict before ADK validates it (3.6.6, 3.5.4, 3.6.1, 3.7.2).
+# Gemini's response schema can't express these rules, and ADK validates the
+# output before enforce_verdict_rules runs, so a broken rule used to stop the run.
+
+def test_3_6_6_partial_with_no_restatement_becomes_unsupported():
+    data = make_verdict([make_check(1), make_check(2, "partially_supported")],
+                        result="fail", feedback="Claim 2 is only partly supported.")
+    repaired, changed = repair_verdict_json(data)
+    assert changed
+    verdict = FactCheckVerdict.model_validate(repaired)
+    assert verdict.checks[0].verdict.value == "supported"
+    assert verdict.checks[1].verdict.value == "unsupported"
+    assert verdict.checks[1].reason.endswith(NO_RESTATEMENT_NOTE)
+    assert verdict.result == "fail"
+    assert verdict.feedback.startswith("Claim 2 is only partly supported.")
+    assert "No restatement was given for claim 2" in verdict.feedback
+
+def test_3_6_6_contradicted_with_no_restatement_inside_a_pass_becomes_a_fail():
+    data = make_verdict([make_check(1, "contradicted", restatement="   ")], result="pass")
+    repaired, changed = repair_verdict_json(data)
+    assert changed
+    verdict = FactCheckVerdict.model_validate(repaired)
+    assert verdict.checks[0].verdict.value == "unsupported"
+    assert verdict.result == "fail"
+    assert "claim 1" in verdict.feedback
+
+def test_3_6_6_a_restatement_that_was_given_is_kept():
+    data = make_verdict([make_check(1, "partially_supported", restatement="What evidence 1 says.")],
+                        result="fail", feedback="Claim 1 is partial.")
+    repaired, changed = repair_verdict_json(data)
+    assert not changed
+    assert repaired == data
+
+def test_3_5_4_a_pass_with_a_failing_claim_becomes_a_fail_naming_it():
+    data = make_verdict([make_check(1), make_check(2, "unsupported", reason="Evidence 1 is silent.")],
+                        result="pass")
+    repaired, changed = repair_verdict_json(data)
+    assert changed
+    verdict = FactCheckVerdict.model_validate(repaired)
+    assert verdict.result == "fail"
+    assert verdict.feedback == "Claim 2 is unsupported: Evidence 1 is silent."
+
+def test_3_6_1_a_fail_with_no_feedback_gets_feedback():
+    repaired, changed = repair_verdict_json(make_verdict([make_check(1)], result="fail"))
+    assert changed
+    assert FactCheckVerdict.model_validate(repaired).feedback == NO_FEEDBACK_NOTE
+
+def test_3_6_4_a_second_check_for_the_same_claim_is_dropped():
+    data = make_verdict([make_check(1), make_check(1, "unsupported")])
+    repaired, changed = repair_verdict_json(data)
+    assert changed
+    verdict = FactCheckVerdict.model_validate(repaired)
+    assert [c.verdict.value for c in verdict.checks] == ["supported"]
+    assert verdict.result == "pass"
+
+def test_3_7_2_a_valid_verdict_or_unexpected_data_is_left_alone():
+    valid = make_verdict([make_check(1)])
+    assert repair_verdict_json(valid) == (valid, False)
+    assert repair_verdict_json(["not", "a", "verdict"]) == (["not", "a", "verdict"], False)
+    assert repair_verdict_json({"result": "pass"}) == ({"result": "pass"}, False)
+
+def model_response(*parts):
+    return LlmResponse(content=types.Content(role="model", parts=list(parts)))
+
+def test_3_7_2_response_callback_repairs_the_models_json():
+    raw = make_verdict([make_check(1, "partially_supported")], result="fail", feedback="Claim 1.")
+    thought = types.Part(text="thinking about claim 1", thought=True)
+    response = model_response(thought, types.Part(text=json.dumps(raw)))
+    returned = repair_verdict_response(FakeCallbackContext({}), response)
+    assert returned is response
+    assert returned.content.parts[0] == thought
+    verdict = FactCheckVerdict.model_validate_json(returned.content.parts[1].text)
+    assert verdict.checks[0].verdict.value == "unsupported"
+
+def test_3_7_2_response_callback_leaves_valid_and_malformed_json_alone():
+    valid = model_response(types.Part(text=json.dumps(make_verdict([make_check(1)]))))
+    assert repair_verdict_response(FakeCallbackContext({}), valid) is None
+    malformed = model_response(types.Part(text="{not json"))
+    assert repair_verdict_response(FakeCallbackContext({}), malformed) is None
+    assert malformed.content.parts[0].text == "{not json"
+    assert repair_verdict_response(FakeCallbackContext({}), LlmResponse()) is None
+
+
 # Agent definition (3.5.1, 3.5.5)
 
 def test_3_5_1_agent_configuration_and_callbacks():
@@ -483,7 +573,7 @@ def test_3_5_1_agent_configuration_and_callbacks():
     assert agent.name == FACT_CHECKER_AGENT_NAME
     assert agent.output_schema is FactCheckVerdict
     assert agent.output_key == STATE_VERDICT
-    assert agent.after_model_callback is count_model_call
+    assert agent.after_model_callback == [count_model_call, repair_verdict_response]
     assert agent.after_agent_callback is enforce_verdict_rules
     assert agent.before_model_callback is not None
 

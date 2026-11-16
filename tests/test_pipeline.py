@@ -228,6 +228,43 @@ def test_3_6_4_a_draft_that_fails_twice_still_ends_on_a_check():
     assert "Support score: 50.0%" in text
 
 
+# The Fact-Checker's verdict as Gemini returned it on 2026-11-16: partially
+# supported with no restatement. ADK validates the output before any agent code
+# runs, so this used to stop the whole run with a ValidationError.
+NO_RESTATEMENT = {
+    "checks": [
+        {"claim_number": 1, "verdict": "supported", "reason": "Evidence 1 says so directly."},
+        {"claim_number": 2, "verdict": "partially_supported", "reason": "Evidence 2 says it keeps attention.",
+         "restatement": ""},
+    ],
+    "result": "fail",
+    "feedback": "Claim 2 overstates evidence 2.",
+}
+
+
+def test_3_6_6_a_verdict_missing_its_restatement_is_revised_not_a_crash():
+    agent, models = scripted_pipeline([PLAN], [BAD_DRAFT, FIXED_DRAFT], [NO_RESTATEMENT, PASS])
+    state, calls = run(agent)
+    assert calls == 5
+    second = request_text(models["synthesizer"], 1)
+    assert second.startswith("MODE: revision")
+    assert "No restatement was given for claim 2" in second
+    assert state[STATE_DRAFT] == FIXED_DRAFT
+    assert state[STATE_VERDICT]["result"] == "pass"
+
+
+def test_3_6_6_a_claim_still_missing_its_restatement_is_flagged_in_the_report():
+    agent, models = scripted_pipeline([PLAN], [BAD_DRAFT, BAD_DRAFT], [NO_RESTATEMENT, NO_RESTATEMENT])
+    state, calls = run(agent)
+    assert calls == 5
+    assert state[STATE_VERDICT]["result"] == "fail"
+    assert state[STATE_VERDICT]["checks"][1]["verdict"] == "unsupported"
+    text = cli.render(state, calls, source_reader=fake_reader)
+    assert "WARNING: this report is incomplete" in text
+    assert "(2) Longformer removes attention entirely. [evidence 2] [FLAGGED]" in text
+    assert "Support score: 50.0%" in text
+
+
 # Search, wired in: fake sources that return the two passages above, so no
 # network is touched, and a throwaway database per test
 
