@@ -57,6 +57,8 @@ from schemas import build_final_report
 logger = logging.getLogger("sp201.web")
 
 APP_NAME = "sp201-web"
+# The name the page shows (the project is SP-201; the tool is Sift)
+APP_TITLE = "Sift"
 USER_ID = "web"
 
 HOST = "127.0.0.1"
@@ -68,6 +70,17 @@ MAX_JOBS_KEPT = 20
 REFRESH_SECONDS = 3
 
 JOB_ID_PATTERN = re.compile(r"^/job/([0-9a-f]{16})$")
+
+# The agents whose events move the waiting page's stage tracker
+AGENT_AUTHORS = ("manager", "synthesizer", "fact_checker", "escalation_checker")
+# The stages the waiting page shows, in order
+STAGES = (("plan", "Plan"), ("search", "Search"), ("write", "Write"), ("check", "Check"),
+          ("report", "Report"))
+# How far the active stage has come, as a share of the progress bar
+STAGE_PROGRESS = {"plan": 10, "search": 30, "write": 55, "check": 80, "report": 100}
+# One cycle of the progress bar's moving stripes. Each refresh starts the
+# animation at the phase the clock says, so it carries on through the reloads.
+STRIPE_SECONDS = 1.2
 
 # Headers sent with every page. default-src 'none' means no script, image, font
 # or frame can load; only the page's own inline style applies.
@@ -99,6 +112,13 @@ class Job:
         self.status = "running"
         self.steps = []
         self.calls = 0
+        # Progress for the waiting page, read from the pipeline's events
+        self.author = None
+        self.sub_questions = []
+        self.searches_called = 0
+        self.searches_done = 0
+        self.write_rounds = 0
+        self.notice = ""
         self.report_html = ""
         self.message = ""
         self.started = time.time()
@@ -114,6 +134,26 @@ class Job:
     def set_calls(self, calls):
         with self.lock:
             self.calls = calls
+
+    # Records one pipeline event: which agent is working, searches sent and
+    # returned, and the Manager's sub-questions once it has planned. A new event
+    # means any retry the notice described is over, so the notice is cleared.
+    def record_event(self, author, search_calls=0, search_results=0, sub_questions=None):
+        with self.lock:
+            if author == "synthesizer" and self.author != "synthesizer":
+                self.write_rounds += 1
+            if author in AGENT_AUTHORS:
+                self.author = author
+            self.searches_called += search_calls
+            self.searches_done += search_results
+            if sub_questions:
+                self.sub_questions = list(sub_questions)
+            self.notice = ""
+
+    # A retry or wait the page should explain while the run looks still
+    def set_notice(self, notice):
+        with self.lock:
+            self.notice = notice
 
     def finish(self, report_html):
         with self.lock:
@@ -135,6 +175,9 @@ class Job:
                 "job_id": self.job_id, "question": self.question, "status": self.status,
                 "steps": list(self.steps), "calls": self.calls, "report_html": self.report_html,
                 "message": self.message, "elapsed": int(end - self.started),
+                "author": self.author, "sub_questions": list(self.sub_questions),
+                "searches_called": self.searches_called, "searches_done": self.searches_done,
+                "write_rounds": self.write_rounds, "notice": self.notice,
             }
 
 
@@ -191,6 +234,7 @@ async def execute(question, job, agent, counter):
     from google.adk.apps.app import App
     from google.adk.runners import InMemoryRunner
     from google.genai import types
+    from search_agent import SEARCH_TOOL_NAME
 
     runner = InMemoryRunner(app=App(name=APP_NAME, root_agent=agent, plugins=[counter]))
     session = await runner.session_service.create_session(
@@ -204,6 +248,12 @@ async def execute(question, job, agent, counter):
         if event.author != last_author and event.author != "user":
             job.add_step(f"{event.author} is working")
         last_author = event.author
+        job.record_event(
+            event.author,
+            search_calls=sum(1 for c in event.get_function_calls() if c.name == SEARCH_TOOL_NAME),
+            search_results=sum(1 for r in event.get_function_responses() if r.name == SEARCH_TOOL_NAME),
+            sub_questions=plan_texts(event.actions.state_delta if event.actions else None),
+        )
         job.set_calls(counter.calls)
         if event.error_code and stopped is None:
             stopped = RunStopped(event.author, event.error_code, event.error_message)
@@ -215,11 +265,62 @@ async def execute(question, job, agent, counter):
     return final.state
 
 
+# The sub-questions in an event's state change, once the Manager has planned
+def plan_texts(state_delta):
+    if not state_delta or STATE_PLAN not in state_delta:
+        return []
+    raw = state_delta[STATE_PLAN]
+    try:
+        if isinstance(raw, str):
+            plan = ManagerPlan.model_validate_json(raw)
+        else:
+            plan = ManagerPlan.model_validate(raw)
+    except ValueError:
+        return []
+    return [sub_question.text for sub_question in plan.sub_questions]
+
+
+RETRY_PATTERN = re.compile(r"retry (\d+) of (\d+) in (\d+)")
+
+
+# Turns a retry warning from rate_limit into a plain line for the waiting page.
+# Only fixed wording and numbers reach the page, never the error text itself.
+def retry_notice(message):
+    match = RETRY_PATTERN.search(message)
+    detail = f" (retry {match.group(1)} of {match.group(2)}, in {match.group(3)} s)" if match else ""
+    if message.startswith("Gemini is overloaded"):
+        return ("Google's Gemini servers are busy right now. "
+                f"The pipeline waits and retries on its own{detail}.")
+    if message.startswith("Gemini"):
+        return f"Gemini asked us to slow down. The pipeline waits and retries on its own{detail}."
+    return "A source (Wikipedia, arXiv or the web) is slow to answer. Search retries on its own."
+
+
+# Passes rate_limit's retry warnings to the job while it runs
+class RetryNoticeHandler(logging.Handler):
+    def __init__(self, job):
+        super().__init__(level=logging.WARNING)
+        self.job = job
+
+    def emit(self, record):
+        try:
+            self.job.set_notice(retry_notice(record.getMessage()))
+        except Exception:
+            self.handleError(record)
+
+
 # The default runner: builds the same pipeline the CLI runs and returns the final
-# state. cli is imported here so that web.py loads without the pipeline.
+# state. cli is imported here so that web.py loads without the pipeline. Only one
+# run goes at a time, so the retry handler is this run's alone.
 def pipeline_runner(question, job):
     from sp201 import cli
-    return asyncio.run(execute(question, job, cli.build_root_agent(), cli.ModelCallCounter()))
+    handler = RetryNoticeHandler(job)
+    rate_logger = logging.getLogger("rate_limit")
+    rate_logger.addHandler(handler)
+    try:
+        return asyncio.run(execute(question, job, cli.build_root_agent(), cli.ModelCallCounter()))
+    finally:
+        rate_logger.removeHandler(handler)
 
 
 # Turns a failed run into a message for the page, using the same explanations as
@@ -266,7 +367,8 @@ class WebApp:
 def work(app, job):
     try:
         state = app.runner(job.question, job)
-        job.finish(render_report_html(state, job.snapshot()["calls"], app.source_reader))
+        snapshot = job.snapshot()
+        job.finish(render_report_html(state, snapshot["calls"], app.source_reader, snapshot["elapsed"]))
     except Exception as error:
         try:
             message = app.explain(error)
@@ -281,19 +383,54 @@ def work(app, job):
 # ---------------------------------------------------------------------------
 
 STYLE = """
-:root { color-scheme: light dark; --muted: #667; --line: #bbc; --flag: #b45309; --bad: #b91c1c; }
-@media (prefers-color-scheme: dark) { :root { --muted: #aab; --line: #445; --flag: #fbbf24; --bad: #f87171; } }
-body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
-h1 { font-size: 1.5rem; } h2 { font-size: 1.15rem; margin-top: 1.75rem; border-bottom: 1px solid var(--line); }
-textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; }
-button { font: inherit; padding: .4rem 1rem; }
+:root { color-scheme: light; --gold: #fdbb30; --ink: #1a1a1a; --muted: #5f6368; --line: #d9d9d9;
+  --ok: #1a7f37; --flag: #b45309; --bad: #b42318; --link: #1a4f8b; }
+body { margin: 0; background: #fff; color: var(--ink);
+  font: 16px/1.55 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+a { color: var(--link); }
+.top { background: #111; color: #fff; border-bottom: 4px solid var(--gold); }
+.top div { max-width: 46rem; margin: 0 auto; padding: .75rem 1rem; display: flex;
+  justify-content: space-between;
+  align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.top a { color: #fff; text-decoration: none; font-weight: 700; font-size: 1.3rem; letter-spacing: .02em; }
+.top span { color: var(--gold); font-size: .85rem; }
+main { max-width: 46rem; margin: 1.5rem auto 3rem; padding: 0 1rem; }
+h1 { font-size: 1.45rem; margin: 0 0 .4rem; }
+h2 { font-size: 1.1rem; margin-top: 1.75rem; padding-bottom: .2rem; border-bottom: 2px solid var(--gold); }
+h3 { font-size: 1rem; margin-bottom: .2rem; }
+label { font-weight: 600; }
+textarea { width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; border: 1px solid #b5b5b5;
+  border-radius: 3px; margin-top: .3rem; }
+button { font: inherit; font-weight: 600; padding: .45rem 1.2rem; border: 1px solid #111; border-radius: 3px;
+  background: #111; color: #fff; cursor: pointer; }
+button:hover { background: #333; }
+.lead { margin-top: 0; }
 .muted { color: var(--muted); font-size: .9rem; }
-.notice { border: 1px solid var(--line); padding: .6rem .8rem; margin: 1rem 0; }
-.warning { border: 2px solid var(--flag); padding: .6rem .8rem; margin: 1rem 0; font-weight: 600; }
-.error { border: 2px solid var(--bad); padding: .6rem .8rem; margin: 1rem 0; }
-ul.claims { padding-left: 1.2rem; } li.claim { margin: .8rem 0; padding-left: .6rem; border-left: 4px solid transparent; }
+.question { border-left: 3px solid #111; padding-left: .8rem; }
+.notice { border: 1px solid var(--line); background: #fafafa; padding: .6rem .8rem; margin: 1rem 0; }
+.busy { border: 1px solid #e3c26a; background: #fff8e1; padding: .6rem .8rem; margin: 1rem 0; }
+.warning { border: 1px solid var(--flag); background: #fff4e5; padding: .6rem .8rem; margin: 1rem 0;
+  font-weight: 600; }
+.error { border: 1px solid var(--bad); background: #fdecea; padding: .6rem .8rem; margin: 1rem 0; }
+.step { font-weight: 600; margin: 1.5rem 0 .4rem; }
+.bar { height: .7rem; background: #ececec; border: 1px solid var(--line); }
+.bar div { height: 100%; background-color: var(--gold);
+  background-image: linear-gradient(45deg, rgba(255,255,255,.35) 25%, transparent 25%, transparent 50%,
+    rgba(255,255,255,.35) 50%, rgba(255,255,255,.35) 75%, transparent 75%, transparent);
+  background-size: 1rem 1rem; animation: stripes 1.2s linear infinite; }
+@keyframes stripes { from { background-position: 1rem 0; } to { background-position: 0 0; } }
+.steps { color: var(--muted); font-size: .9rem; margin: .5rem 0 1rem; }
+.steps b { color: var(--ink); }
+.now { margin: .5rem 0 1rem; }
+table.stats { border-collapse: collapse; width: 100%; margin: 1rem 0 .5rem; }
+table.stats th, table.stats td { border: 1px solid var(--line); padding: .35rem .6rem; text-align: left; }
+table.stats th { background: #f5f5f5; font-size: .8rem; font-weight: 600; color: var(--muted); }
+table.stats td { font-size: 1.15rem; font-weight: 700; }
+ul.claims { padding-left: 1.2rem; }
+li.claim { margin: .8rem 0; padding-left: .6rem; border-left: 3px solid transparent; }
 li.flagged { border-left-color: var(--flag); }
-.badge { font-weight: 700; color: var(--flag); font-size: .85rem; }
+.tag { font-size: .8rem; font-weight: 700; margin-left: .3rem; white-space: nowrap; }
+.tag.ok { color: var(--ok); } .tag.flag { color: var(--flag); } .tag.na { color: var(--muted); }
 .src { color: var(--muted); font-size: .9rem; }
 """
 
@@ -329,8 +466,10 @@ def page(title, body, refresh=False):
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"{refresh_tag}<title>{esc(title)}</title><style>{STYLE}</style></head>"
-        f"<body>{body}</body></html>"
+        f"{refresh_tag}<title>{esc(title)} | {APP_TITLE}</title><style>{STYLE}</style></head>"
+        f'<body><header class="top"><div><a href="/">{APP_TITLE}</a>'
+        "<span>Research answers, every claim checked.</span></div></header>"
+        f"<main>{body}</main></body></html>"
     )
 
 
@@ -342,7 +481,10 @@ def render_index(running_job_id=None):
                   f'<a href="/job/{esc(running_job_id)}">Watch it</a>. '
                   "Only one run can go at a time.</div>")
     body = (
-        "<h1>SP-201 Research &amp; Fact-Checking</h1>"
+        "<h1>Ask a research question</h1>"
+        '<p class="lead">A Manager splits your question into sub-questions, Search reads Wikipedia, '
+        "arXiv and the web, a Synthesizer writes claims that each cite a source, and a Fact-Checker "
+        "checks every claim before you see it.</p>"
         f"{banner}"
         '<form method="post" action="/run">'
         '<label for="question">Research question</label>'
@@ -354,7 +496,7 @@ def render_index(running_job_id=None):
         '<p class="muted">On the free tier, Google may use prompts and responses to improve its '
         "products. Do not enter confidential or personal information (SRS 3.7.8).</p>"
     )
-    return page("SP-201 Research & Fact-Checking", body)
+    return page("Ask a research question", body)
 
 
 # A plain page for a refused request
@@ -364,20 +506,75 @@ def render_message(title, message):
     return page(title, body)
 
 
+# Seconds as m:ss
+def clock(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+# Which stage the run is in, from the last agent that worked
+def current_stage(snapshot):
+    author = snapshot["author"]
+    if author == "synthesizer":
+        return "write"
+    if author in ("fact_checker", "escalation_checker"):
+        return "check"
+    return "search" if snapshot["searches_called"] else "plan"
+
+
+# One plain sentence on what is happening now
+def now_line(snapshot, stage):
+    revising = snapshot["write_rounds"] >= 2
+    if stage == "plan":
+        return "The Manager is splitting your question into sub-questions."
+    if stage == "search":
+        return (f"Search is reading Wikipedia, arXiv and the web: {snapshot['searches_done']} of "
+                f"{snapshot['searches_called']} searches back.")
+    if stage == "write":
+        if revising:
+            return "Round 2: the Synthesizer is revising the claims the Fact-Checker sent back."
+        return "The Synthesizer is writing the report, and every claim cites the passage it came from."
+    if revising:
+        return "The Fact-Checker is checking the revised claims against their sources."
+    return "The Fact-Checker is checking every claim against the passage it cites."
+
+
+# "Step 2 of 4", a progress bar, and the stages with the done ones checked
+def render_stages(stage):
+    names = [name for name, _ in STAGES]
+    position = names.index(stage)
+    working = len(STAGES) - 1
+    delay = -(time.time() % STRIPE_SECONDS)
+    labels = []
+    for index, (_name, label) in enumerate(STAGES):
+        if index < position:
+            labels.append(f"{label} &#10003;")
+        elif index == position:
+            labels.append(f"<b>{label}</b>")
+        else:
+            labels.append(label)
+    return (f'<p class="step">Step {min(position + 1, working)} of {working}</p>'
+            f'<div class="bar"><div style="width:{STAGE_PROGRESS[stage]}%;animation-delay:{delay:.2f}s">'
+            f'</div></div><p class="steps">{" &rarr; ".join(labels)}</p>')
+
+
 # The page for one job: progress while it runs, the report when it is done, or the
 # reason it stopped
 def render_job(snapshot):
     status = snapshot["status"]
-    head = (f"<h1>SP-201 Research &amp; Fact-Checking</h1>"
-            f'<p><strong>Question:</strong> {esc(snapshot["question"])}</p>')
+    head = f'<p class="question"><strong>Question:</strong> {esc(snapshot["question"])}</p>'
     if status == "running":
-        steps = "".join(f"<li>{esc(step)}</li>" for step in snapshot["steps"]) or "<li>Starting</li>"
-        body = (
-            f"{head}<h2>Working</h2><ol>{steps}</ol>"
-            f'<p class="muted">{snapshot["elapsed"]} seconds so far. '
-            f'Model calls used: {snapshot["calls"]}. This page refreshes by itself.</p>'
-        )
-        return page("Working", body, refresh=True)
+        stage = current_stage(snapshot)
+        parts = [head, render_stages(stage), f'<p class="now">{esc(now_line(snapshot, stage))}</p>']
+        if snapshot["notice"]:
+            parts.append(f'<div class="busy">{esc(snapshot["notice"])}</div>')
+        if snapshot["sub_questions"]:
+            items = "".join(f"<li>{esc(text)}</li>" for text in snapshot["sub_questions"])
+            parts.append(f"<h2>Sub-questions</h2><ol>{items}</ol>")
+        calls = snapshot["calls"]
+        parts.append(f'<p class="muted">{clock(snapshot["elapsed"])} elapsed. {calls} model '
+                     f'call{"" if calls == 1 else "s"} so far. This page updates by itself.</p>')
+        return page("Working", "".join(parts), refresh=True)
     if status == "error":
         body = (f"{head}<div class=\"error\">{esc(snapshot['message'])}</div>"
                 f'<p class="muted">Model calls used: {snapshot["calls"]}.</p>'
@@ -389,7 +586,7 @@ def render_job(snapshot):
 
 # Builds the report section for a finished run from its final session state. Only
 # a draft the Fact-Checker fully checked is ever shown (SRS 3.6.4).
-def render_report_html(state, calls, source_reader):
+def render_report_html(state, calls, source_reader, elapsed=None):
     parts = []
 
     raw_plan = state.get(STATE_PLAN)
@@ -417,7 +614,7 @@ def render_report_html(state, calls, source_reader):
         except ValueError as error:
             parts.append(f'<div class="error">No report shown: {esc(error)}</div>')
         else:
-            parts.append(render_report_body(report, source_reader))
+            parts.append(render_report_body(report, source_reader, calls, elapsed))
 
     parts.append(f'<p class="muted">Model calls: {int(calls)}</p>')
     return "".join(parts)
@@ -425,7 +622,7 @@ def render_report_html(state, calls, source_reader):
 
 # The report itself: title, summary, each claim with its sources, the source list,
 # the flagged claims and the support score
-def render_report_body(report, source_reader):
+def render_report_body(report, source_reader, calls=None, elapsed=None):
     draft = report.draft
     checks = {}
     for check in report.verdict.checks:
@@ -440,7 +637,16 @@ def render_report_body(report, source_reader):
     for row in source_reader(cited):
         sources[row.evidence_id] = row
 
-    parts = []
+    stats = [(f"{report.support_score}%" if report.support_score is not None else "none", "supported"),
+             (len(draft.all_claims()), "claims"),
+             (len({row.source_url for row in sources.values()}), "sources")]
+    if calls is not None:
+        stats.append((int(calls), "model calls"))
+    if elapsed is not None:
+        stats.append((clock(elapsed), "time taken"))
+    parts = ['<table class="stats"><tr>'
+             + "".join(f"<th>{esc(label)}</th>" for _, label in stats) + "</tr><tr>"
+             + "".join(f"<td>{esc(value)}</td>" for value, _ in stats) + "</tr></table>"]
     if report.incomplete:
         parts.append('<div class="warning">This report is incomplete: the pipeline ran out of '
                      "revisions or retries, and the claims marked FLAGGED could not be supported "
@@ -451,9 +657,13 @@ def render_report_body(report, source_reader):
         items = []
         for claim in section.claims:
             flagged = claim.claim_number in report.flagged_claim_numbers
-            badge = ""
+            verdict = checks[claim.claim_number].verdict.value
             if flagged:
-                badge = f' <span class="badge">FLAGGED: {esc(checks[claim.claim_number].verdict.value)}</span>'
+                badge = f' <span class="tag flag">FLAGGED: {esc(verdict)}</span>'
+            elif verdict == "supported":
+                badge = ' <span class="tag ok">&#10003; Supported</span>'
+            else:
+                badge = ' <span class="tag na">Not verifiable</span>'
             cites = []
             for evidence_id in claim.evidence_ids:
                 row = sources.get(evidence_id)
