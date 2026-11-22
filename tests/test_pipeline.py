@@ -418,3 +418,90 @@ def test_lock_2_a_search_refused_for_missing_buzz_words_does_not_count(tmp_path)
     assert "not searched: buzz_words is empty" in str(models["manager"].requests[1].contents)
     assert state[pipeline.STATE_PLAN_REFUSALS] == 1
     assert [r["status"] for r in state[STATE_SEARCH_RESULTS]["results"]] == ["found", "found"]
+
+
+# Every checked draft is saved (SRS 3.5.6, 3.9.4): the EscalationChecker writes
+# each iteration's claims, verdicts, reasons and cited evidence to Search's store
+
+def test_3_5_6_every_checked_draft_is_saved_with_its_verdicts(tmp_path):
+    agent, store = search_pipeline(tmp_path)
+    script(agent, search_calls() + [call("set_model_response", **PLAN)], [BAD_DRAFT, FIXED_DRAFT], [FAIL, PASS])
+    state, _ = run(agent, state={STATE_USER_QUESTION: QUESTION})
+
+    question_id = state[STATE_QUESTION_ID]
+    assert store.latest_iteration(question_id) == 2
+    first, second = store.get_claims(question_id, 1), store.get_claims(question_id, 2)
+    assert [(c["claim_number"], c["verdict"], c["evidence_ids"]) for c in first] == [
+        (1, "supported", [1]), (2, "contradicted", [2])]
+    assert first[1]["sentence"] == "Longformer removes attention entirely."
+    assert first[1]["reason"] == "Evidence 2 says it keeps attention."
+    assert first[1]["restatement"] == "Longformer combines local and global attention to scale linearly."
+    assert [(c["verdict"], c["evidence_ids"]) for c in second] == [("supported", [1]), ("supported", [2])]
+    # The metric the report shows can be recomputed from the database alone
+    assert store.support_score(question_id) == 100.0
+    assert store.support_score(question_id, 1) == 50.0
+
+
+def test_3_5_6_a_made_up_citation_is_saved_without_its_link(tmp_path, monkeypatch):
+    monkeypatch.setenv("SP201_MAX_REVISIONS", "0")
+    made_up = draft("Longformer scales linearly.")
+    made_up["sections"][0]["claims"][1]["evidence_ids"] = [9]
+    agent, store = search_pipeline(tmp_path)
+    # The model calls claim 2 supported; the Fact-Checker's code marks it
+    # unsupported, because evidence 9 is not in the search results
+    script(agent, search_calls() + [call("set_model_response", **PLAN)], [made_up], [PASS])
+    state, _ = run(agent, state={STATE_USER_QUESTION: QUESTION})
+
+    saved = store.get_claims(state[STATE_QUESTION_ID])
+    assert saved[0]["evidence_ids"] == [1]
+    assert saved[1]["verdict"] == "unsupported"
+    assert saved[1]["reason"] == "Cited evidence ID not in search results: 9."
+    assert saved[1]["evidence_ids"] == []
+    assert store.support_score(state[STATE_QUESTION_ID]) == 50.0
+    assert state[STATE_VERDICT]["result"] == "fail"
+
+
+def stored_question(store, text, passage):
+    question_id = store.add_question(text)
+    store.add_sub_questions(question_id, {"user_question": text, "sub_questions": [
+        {"sub_question_id": 1, "text": "A sub-question to search", "preferred_sources": ["web"], "priority": 1}]})
+    return question_id, store.add_evidence(question_id, {
+        "sub_question_id": 1, "source_url": "https://example.org/x", "source_title": "X",
+        "passage": passage, "retrieved_at": "2026-11-22T00:00:00+00:00", "source_type": "web"})
+
+
+def test_3_5_6_a_supported_claim_citing_another_questions_evidence_is_refused_and_the_run_goes_on(
+        tmp_path, caplog):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    question_id, _ = stored_question(store, "First question", "First passage.")
+    _, other_evidence = stored_question(store, "Second question", "Second passage.")
+    foreign = draft("Longformer scales linearly.")
+    foreign["sections"][0]["claims"][1]["evidence_ids"] = [other_evidence]
+    state = {STATE_QUESTION_ID: question_id, STATE_DRAFT: foreign, STATE_VERDICT: PASS}
+    assert pipeline.save_verdicts(store, state) is None
+    assert "The verdicts for question 1 were not saved" in caplog.text
+    assert store.get_claims(question_id) == []
+
+
+def test_3_5_6_iterations_count_up_from_one(tmp_path):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    question_id, evidence_id = stored_question(store, "A question", "A passage.")
+    checked = draft("Longformer scales linearly.")
+    for claim in checked["sections"][0]["claims"]:
+        claim["evidence_ids"] = [evidence_id]
+    state = {STATE_QUESTION_ID: question_id, STATE_DRAFT: checked, STATE_VERDICT: FAIL}
+    assert pipeline.save_verdicts(store, state) == 1
+    state[STATE_VERDICT] = PASS
+    assert pipeline.save_verdicts(store, state) == 2
+
+
+def test_3_5_6_nothing_is_saved_without_a_store_or_a_question_id(tmp_path):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    state = {STATE_DRAFT: FIXED_DRAFT, STATE_VERDICT: PASS}
+    assert pipeline.save_verdicts(None, {**state, STATE_QUESTION_ID: 1}) is None
+    assert pipeline.save_verdicts(store, state) is None
+    # The pipeline without Search has no store, and still runs
+    agent, _ = scripted_pipeline([PLAN], [FIXED_DRAFT], [PASS])
+    assert agent.sub_agents[1].sub_agents[2].store is None
+    state, _ = run(agent)
+    assert state[STATE_VERDICT]["result"] == "pass"
