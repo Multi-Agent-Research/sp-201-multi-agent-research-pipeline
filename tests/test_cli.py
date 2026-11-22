@@ -4,6 +4,7 @@
 import asyncio
 import json
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
 from google.adk.models.base_llm import BaseLlm
@@ -174,3 +175,23 @@ def test_a_used_up_daily_quota_prints_a_plain_message(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "daily request quota is used up" in captured.out
     assert "Traceback" not in captured.err
+
+
+# SRS 3.8.3: the CLI shows progress, one line as each agent starts, and with
+# --verbose the tools each one calls
+def test_3_8_3_the_cli_prints_a_line_as_each_agent_starts(capsys):
+    search = types.Part(function_call=types.FunctionCall(name="search_sub_question", args={}))
+    events = [SimpleNamespace(author="user", content=None),
+              SimpleNamespace(author="manager", content=types.Content(role="model", parts=[search])),
+              SimpleNamespace(author="manager", content=None),
+              SimpleNamespace(author="synthesizer", content=None),
+              SimpleNamespace(author="fact_checker", content=None)]
+    last = None
+    for event in events:
+        cli.print_progress(event, last, verbose=False)
+        last = event.author
+    assert capsys.readouterr().out.splitlines() == [
+        "... manager is working", "... synthesizer is working", "... fact_checker is working"]
+    cli.print_progress(events[1], None, verbose=True)
+    assert capsys.readouterr().out.splitlines() == ["... manager is working",
+                                                    "    manager calls search_sub_question"]

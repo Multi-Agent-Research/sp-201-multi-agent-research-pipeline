@@ -2,16 +2,25 @@
 # project root:
 #     python -m pytest tests
 # No test touches the network: every source is a fake that records its queries.
+import sqlite3
+from datetime import datetime
+
+import pytest
+from ddgs.exceptions import DDGSException
+
 from evidence_store import EvidenceStore
 from rate_limit import RetryPolicy
 from schemas import STATE_QUESTION_ID
 from schemas import STATE_USER_QUESTION
+from schemas import SearchResults
 from schemas import SourceType
+from schemas import SubQuestionEvidence
 from search_agent import MAX_EVIDENCE_PER_SUB_QUESTION
 from search_agent import NOT_SEARCHED_PREFIX
 from search_agent import PASSAGES_PER_DOCUMENT
 from search_agent import SEARCH_INSTRUCTION
 from search_agent import FetchError
+from search_agent import PageMissing
 from search_agent import RawDocument
 from search_agent import SavedPassages
 from search_agent import SearchTool
@@ -27,6 +36,7 @@ from search_agent import passages_of
 from search_agent import about_sub_question
 from search_agent import fetch_web
 from search_agent import first_title
+from search_agent import page_missing
 from search_agent import page_passages
 from search_agent import question_words
 from search_agent import read_web_page
@@ -896,3 +906,118 @@ def test_a_search_with_no_buzz_words_is_refused_as_not_searched():
     assert result["status"] == "failed"
     assert result["error"].startswith(NOT_SEARCHED_PREFIX + "buzz_words is empty")
     assert tool.registry == {}  # refused before a search task exists, so a retry can run
+
+
+# ----- SRS 3.2.3: a search that found nothing is told apart from one that failed -----
+
+def test_3_2_3_a_search_that_finds_nothing_is_empty_with_no_error(tmp_path):
+    result, rows = search(tmp_path, FakeSource({}), article=FakeSource({}), sources=("wikipedia", "web"))
+    assert result.status.value == "empty"
+    assert result.error == ""
+    assert result.evidence_ids == [] and rows == []
+
+
+def test_3_2_3_a_source_that_errors_is_failed_with_its_reason(tmp_path):
+    def broken(query):
+        raise FetchError("HTTP 503 from en.wikipedia.org")
+    store = EvidenceStore(tmp_path / "evidence.db")
+    question_id = store.add_question("A question")
+    fetchers = {SourceType.WIKIPEDIA: broken, SourceType.ARXIV: broken, SourceType.WEB: broken}
+    result = run_search(store, question_id, 1, SUB_QUESTION, ["wikipedia"], BUZZ, fetchers, {})
+    assert result.status.value == "failed"
+    assert "wikipedia: HTTP 503 from en.wikipedia.org" in result.error
+    assert result.evidence_ids == []
+
+
+def test_3_2_3_the_schema_keeps_empty_and_failed_apart():
+    with pytest.raises(ValueError, match="requires an error message"):
+        SubQuestionEvidence(sub_question_id=1, status="failed")
+    with pytest.raises(ValueError, match="must not carry evidence ids"):
+        SubQuestionEvidence(sub_question_id=1, status="empty", evidence_ids=[3])
+    results = SearchResults(results=[
+        SubQuestionEvidence(sub_question_id=1, status="found", evidence_ids=[1]),
+        SubQuestionEvidence(sub_question_id=2, status="empty"),
+        SubQuestionEvidence(sub_question_id=3, status="failed", error="HTTP 503"),
+    ])
+    assert results.gaps() == [2, 3]
+
+
+# ----- SRS 3.2.6: a source's address is confirmed before its passage is stored -----
+
+DEAD_LINK = RawDocument("UDP explained", "https://example.org/gone", "",
+                        "The User Datagram Protocol is used by DNS and streaming applications.")
+
+
+def test_3_2_6_a_missing_page_or_unreachable_host_is_told_apart_from_a_refusal():
+    assert page_missing("Failed to fetch https://example.org/gone: HTTP 404")
+    assert page_missing("Failed to fetch https://example.org/gone: HTTP 410")
+    assert page_missing("DNSError: DNSError('error sending request > DNS error: no records found')")
+    assert page_missing("ConnectError: ConnectError('tcp connect error > Connection refused')")
+    assert not page_missing("Failed to fetch https://example.org/locked: HTTP 403")
+    assert not page_missing("Failed to fetch https://example.org/busy: HTTP 503")
+    assert not page_missing("TimeoutError: operation timed out")
+
+
+class Extractor:
+    def __init__(self, error):
+        self.error = error
+
+    def extract(self, url, fmt):
+        raise self.error
+
+
+def test_3_2_6_reading_a_dead_address_raises_page_missing():
+    gone = Extractor(DDGSException("Failed to fetch https://example.org/gone: HTTP 404"))
+    with pytest.raises(PageMissing, match="example.org does not resolve"):
+        read_web_page("https://example.org/gone", ddgs_factory=lambda: gone, sleep=lambda s: None)
+    locked = Extractor(DDGSException("Failed to fetch https://example.org/locked: HTTP 403"))
+    with pytest.raises(FetchError) as raised:
+        read_web_page("https://example.org/locked", ddgs_factory=lambda: locked, sleep=lambda s: None)
+    assert not isinstance(raised.value, PageMissing)
+
+
+def dead_link_search(tmp_path, page_reader):
+    store = EvidenceStore(tmp_path / "evidence.db")
+    question_id = store.add_question("A question")
+    fetchers = {SourceType.WIKIPEDIA: FakeSource({}), SourceType.ARXIV: FakeSource({}),
+                SourceType.WEB: FakeSource({SUB_QUESTION: [DEAD_LINK]})}
+    result = run_search(store, question_id, 1, SUB_QUESTION, ["web"], BUZZ, fetchers, {},
+                        page_reader=page_reader)
+    return result, store.read_evidence(result.evidence_ids)
+
+
+def test_3_2_6_a_web_result_whose_page_is_gone_is_not_stored(tmp_path):
+    def gone(url):
+        raise PageMissing("example.org does not resolve: HTTP 404")
+    result, rows = dead_link_search(tmp_path, gone)
+    assert rows == []
+    assert result.status.value == "empty"
+
+
+def test_3_2_6_a_page_that_answered_but_refused_reading_keeps_its_snippet(tmp_path):
+    def refused(url):
+        raise FetchError("could not read example.org: DDGSException: HTTP 403")
+    _, rows = dead_link_search(tmp_path, refused)
+    assert [row.passage for row in rows] == [DEAD_LINK.content]
+    assert rows[0].source_url == "https://example.org/gone"
+
+
+# ----- SRS 3.3.2: each passage is stored with its source's details -----
+
+def test_3_3_2_each_passage_is_stored_with_its_source_fields(tmp_path):
+    paper = RawDocument("Attention Is All You Need", "https://arxiv.org/abs/1706.03762", "2017-06-12",
+                        "We propose the Transformer, a network built on attention alone. It uses no "
+                        "User Datagram Protocol at all, which is fine for DNS applications.")
+    result, _ = search(tmp_path, FakeSource({}), sources=("arxiv",),
+                       arxiv=FakeSource({" ".join(BUZZ): [paper], SUB_QUESTION: [paper]}))
+    assert result.status.value == "found"
+    with sqlite3.connect(tmp_path / "evidence.db") as conn:
+        row = conn.execute(
+            "SELECT e.source_url, e.source_title, e.published_date, e.passage, e.retrieved_at, "
+            "e.source_type, s.text, s.plan_number FROM evidence e "
+            "JOIN sub_question s ON s.sub_question_id = e.sub_question_id").fetchone()
+    url, title, published, passage, retrieved_at, source_type, sub_question, plan_number = row
+    assert (url, title, published, source_type) == (paper.url, paper.title, "2017-06-12", "arxiv")
+    assert passage == paper.content
+    assert datetime.fromisoformat(retrieved_at).utcoffset().total_seconds() == 0
+    assert (sub_question, plan_number) == (SUB_QUESTION, 1)

@@ -289,7 +289,13 @@ class EvidenceStore:
     # and cited evidence, in one transaction. Returns the new claim_ids in claim order.
     # Refuses a draft the Fact-Checker did not fully check (req. 3.6.4) and any
     # citation of evidence that belongs to a different question.
-    def save_claims(self, question_id, iteration, draft, verdict):
+    #
+    # unlink names the claims whose citations outside this question are left out
+    # instead of refused: the ones the Fact-Checker already marked unsupported for
+    # citing evidence Search never returned. Their reason still names the bad id,
+    # so nothing is lost, and a made-up citation no longer blocks the save. Any
+    # other claim citing outside the question still refuses the whole draft.
+    def save_claims(self, question_id, iteration, draft, verdict, unlink=()):
         if iteration < 1:
             raise EvidenceStoreError("iteration starts at 1")
         if not verdict.covers(draft):
@@ -297,18 +303,24 @@ class EvidenceStore:
         checks = {}
         for check in verdict.checks:
             checks[check.claim_number] = check
+        unlink = set(unlink)
         cited = sorted(set(draft.cited_evidence_ids()))
         marks = ",".join("?" * len(cited))
         claim_ids = []
         with closing(self.connect()) as conn:
-            owned = conn.execute(
-                "SELECT COUNT(*) FROM evidence e JOIN sub_question s "
+            owned = set()
+            for row in conn.execute(
+                "SELECT e.evidence_id FROM evidence e JOIN sub_question s "
                 "ON s.sub_question_id = e.sub_question_id "
                 f"WHERE s.question_id = ? AND e.evidence_id IN ({marks})",
                 [question_id] + cited,
-            ).fetchone()[0]
-            if owned != len(cited):
-                raise EvidenceStoreError("draft cites evidence that does not belong to this question")
+            ).fetchall():
+                owned.add(row[0])
+            for claim in draft.all_claims():
+                if claim.claim_number in unlink:
+                    continue
+                if not set(claim.evidence_ids).issubset(owned):
+                    raise EvidenceStoreError("draft cites evidence that does not belong to this question")
             try:
                 with conn:
                     for claim in draft.all_claims():
@@ -321,7 +333,7 @@ class EvidenceStore:
                         )
                         claim_id = cursor.lastrowid
                         claim_ids.append(claim_id)
-                        for evidence_id in sorted(set(claim.evidence_ids)):
+                        for evidence_id in sorted(set(claim.evidence_ids) & owned):
                             conn.execute(
                                 "INSERT INTO claim_evidence (claim_id, evidence_id) VALUES (?, ?)",
                                 (claim_id, evidence_id),

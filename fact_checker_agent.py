@@ -3,8 +3,8 @@
 Verifies each claim in DraftReport against its cited evidence, records a
 verdict for each claim, and gives an overall pass/fail result. Evidence
 reaches the model through a before_model_callback on the user channel,
-never the system instruction. Persistence is not this module's job;
-EvidenceStore.save_claims handles it.
+never the system instruction. Persistence is not this module's job: the
+EscalationChecker saves each checked draft through EvidenceStore.save_claims.
 """
 
 import json
@@ -55,6 +55,10 @@ NO_RESTATEMENT_NOTE = "No restatement was given, so the claim is treated as unsu
 
 # Used when the model fails a draft without naming a failing claim
 NO_FEEDBACK_NOTE = "The Fact-Checker failed the draft without saying why."
+
+# Starts the reason of a claim that cites evidence Search never returned. The
+# EscalationChecker looks for it to save such a claim without the bad link.
+UNKNOWN_CITATION_REASON = "Cited evidence ID not in search results"
 
 
 class EvidenceError(ValueError):
@@ -237,7 +241,7 @@ def flag_unknown_citations(verdict, draft, known_evidence_ids):
             check = ClaimCheck(
                 claim_number=check.claim_number,
                 verdict=Verdict.UNSUPPORTED,
-                reason=f"Cited evidence ID not in search results: {ids}.",
+                reason=f"{UNKNOWN_CITATION_REASON}: {ids}.",
             )
         checks.append(check)
 

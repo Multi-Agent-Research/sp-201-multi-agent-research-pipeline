@@ -3,12 +3,20 @@
 #     python -m pytest tests
 from google.genai import types
 
+from schemas import STATE_DRAFT
+from schemas import STATE_FEEDBACK
+from schemas import STATE_VERDICT
+from schemas import ManagerPlan
+from schemas import SearchResults
 from schemas import SearchStatus
 from schemas import SubQuestion
 from schemas import SubQuestionEvidence
+from schemas import is_revision
+from synthesizer_agent import build_data_message
 from synthesizer_agent import build_instruction
 from synthesizer_agent import build_synthesizer_agent
 from synthesizer_agent import format_sub_question
+from synthesizer_agent import read_revision_block
 
 
 def test_3_4_2_the_report_answers_every_part_with_specific_facts():
@@ -62,3 +70,27 @@ def test_3_7_4_the_only_state_slot_is_the_question():
     instruction = build_instruction()
     assert instruction.count("{") == 1 and instruction.count("}") == 1
     assert "{user_question}" in instruction
+
+
+# SRS 3.4.6: the Synthesizer knows a first draft from a revision by the feedback
+# in state, and says which in the first line of what the model reads
+def test_3_4_6_the_mode_is_initial_draft_without_feedback_and_revision_with_it():
+    plan = ManagerPlan(user_question="What is attention?", sub_questions=[SubQuestion(
+        sub_question_id=1, text="What is self-attention?", preferred_sources=["wikipedia"], priority=1)])
+    results = SearchResults(results=[SubQuestionEvidence(sub_question_id=1, status=SearchStatus.EMPTY)])
+    draft = {"title": "Attention", "summary": "A short answer.", "sections": [{"heading": "What it is",
+             "claims": [{"claim_number": 1, "sentence": "Attention weighs tokens.", "evidence_ids": [1]}]}]}
+    verdict = {"checks": [{"claim_number": 1, "verdict": "unsupported", "reason": "Evidence 1 does not say so."}],
+               "result": "fail", "feedback": "Claim 1 is unsupported."}
+
+    assert not is_revision({}) and not is_revision({STATE_FEEDBACK: ""})
+    assert read_revision_block({STATE_FEEDBACK: ""}) is None
+    first = build_data_message(plan, results, {}, None)
+    assert first.startswith("MODE: initial_draft")
+
+    state = {STATE_FEEDBACK: "Claim 1 is unsupported.", STATE_DRAFT: draft, STATE_VERDICT: verdict}
+    assert is_revision(state)
+    block = read_revision_block(state)
+    second = build_data_message(plan, results, {}, block)
+    assert second.startswith("MODE: revision")
+    assert "Claim 1 is unsupported." in second and "Attention weighs tokens." in second

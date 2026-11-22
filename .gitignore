@@ -221,3 +221,6 @@ __marimo__/
 
 # SP-201
 *.db
+
+# SP-201 evaluation runs (python -m sp201.evaluate)
+evaluation/runs/

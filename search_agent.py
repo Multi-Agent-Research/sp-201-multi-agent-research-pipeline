@@ -132,6 +132,10 @@ WEB_BACKENDS = "wikipedia,brave,duckduckgo,mojeek,startpage,yahoo"
  
 class FetchError(Exception):
     """A source could not be searched. The message says why, for SubQuestionEvidence.error."""
+
+
+class PageMissing(FetchError):
+    """A web result's address does not resolve: the page is gone or its host cannot be reached."""
  
  
 class RawDocument(NamedTuple):
@@ -398,10 +402,26 @@ def readable_text(text):
     return "\n\n".join(paragraphs)
 
 
+# How ddgs reports an address that does not resolve (checked live 2026-11-22): the
+# site answers 404 or 410 ("Failed to fetch <url>: HTTP 404"), or the request never
+# reaches a server ("DNSError: ..." for a host with no address, "ConnectError: ..."
+# for one that refuses the connection)
+MISSING_PAGE_STATUS = re.compile(r"HTTP (?:404|410)$")
+UNREACHABLE_HOST_ERRORS = ("DNSError", "ConnectError")
+
+
+def page_missing(error):
+    """True when a page read failed because the address does not resolve (SRS 3.2.6)."""
+    text = str(error).strip()
+    return bool(MISSING_PAGE_STATUS.search(text)) or text.startswith(UNREACHABLE_HOST_ERRORS)
+
+
 def read_web_page(url, ddgs_factory=None, sleep=time.sleep):
     """A web page's readable text (readable_text), or None if it has none: ddgs fetches
-    the page the way a browser would and strips the markup. Raises FetchError if the
-    page cannot be fetched. A PDF is not read (its text would come back as debris)."""
+    the page the way a browser would and strips the markup. Raises PageMissing if the
+    address does not resolve (page_missing), and FetchError if the page cannot be
+    fetched for any other reason. A PDF is not read (its text would come back as
+    debris)."""
     parsed = urllib.parse.urlparse(url or "")
     if parsed.scheme not in ("http", "https") or parsed.path.lower().endswith(".pdf"):
         return None
@@ -415,6 +435,8 @@ def read_web_page(url, ddgs_factory=None, sleep=time.sleep):
     try:
         content = ddgs_factory().extract(url, fmt="text_plain").get("content")
     except Exception as error:  # the library raises its own errors and the HTTP client's
+        if page_missing(error):
+            raise PageMissing(f"{parsed.netloc} does not resolve: {error}") from error
         raise FetchError(f"could not read {parsed.netloc}: {type(error).__name__}: {error}") from error
     if not isinstance(content, str):
         return None
@@ -825,6 +847,13 @@ def run_search(store, question_id, sub_question_id, text, preferred_sources, buz
     read, or holds no passage on topic, gives its search snippet instead. A web result
     is on topic if about_sub_question holds for its title and snippet.
 
+    A source's address is confirmed before its passage is stored (SRS 3.2.6). Wikipedia
+    and arXiv addresses come from the pages and records actually fetched. A web result
+    whose page is gone (404, 410) or whose host cannot be reached (PageMissing) is
+    dropped, snippet and all. A page that answered but would not be read (403, a 5xx)
+    keeps its snippet, since the address resolved; so does a timeout, which proves
+    neither.
+
     If the listed sources save nothing and Wikipedia was not among them, Wikipedia is
     tried next (its exact article first, then its branches), before the web fallback:
     the buzz words are Wikipedia article names, so an empty arXiv search must not mean
@@ -907,6 +936,9 @@ def run_search(store, question_id, sub_question_id, text, preferred_sources, buz
         page_text = None
         try:
             page_text = page_reader(document.url)
+        except PageMissing as error:
+            logger.info("web, sub-question %s: %s; result dropped", sub_question_id, short_error(error))
+            return []
         except FetchError as error:
             logger.info("web, sub-question %s: %s; keeping the snippet", sub_question_id, short_error(error))
         except Exception:  # a bug in the reader must not take the run down

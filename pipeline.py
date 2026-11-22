@@ -24,6 +24,14 @@
 # Manager to it: its first turn, and the turn after a refused plan, may only
 # call Search; and a plan with a sub-question it has not searched is refused,
 # at most MAX_PLAN_REFUSALS times, so a run can never loop.
+#
+# Every checked draft is saved (SRS 3.5.6, 3.9.4): after each Fact-Checker
+# verdict the EscalationChecker writes the draft's claims, verdicts, reasons and
+# cited evidence ids to Search's store, one iteration per pass through the loop,
+# so the evaluation harness can recompute every metric without re-running.
+import logging
+from typing import Any
+
 from dotenv import load_dotenv
 from google.adk.agents import BaseAgent
 from google.adk.agents import LoopAgent
@@ -32,13 +40,18 @@ from google.adk.events import Event
 from google.adk.events import EventActions
 from google.genai import types
 
+from fact_checker_agent import UNKNOWN_CITATION_REASON
 from fact_checker_agent import build_fact_checker_agent
+from fact_checker_agent import parse_draft
 from fact_checker_agent import parse_verdict
 from manager_agent import build_manager_agent
 from manager_agent import decompose_question
 from manager_agent import get_model_id
 from rate_limit import use_rate_limited_models
+from schemas import STATE_DRAFT
+from schemas import STATE_QUESTION_ID
 from schemas import STATE_VERDICT
+from schemas import Verdict
 from schemas import loop_max_iterations
 from schemas import max_revisions
 from schemas import should_escalate
@@ -47,6 +60,8 @@ from search_agent import SEARCH_TOOL_NAME
 from search_agent import as_callback_list
 from search_agent import attach_search
 from synthesizer_agent import build_synthesizer_agent
+
+logger = logging.getLogger(__name__)
 
 PIPELINE_NAME = "sp201_pipeline"
 LOOP_NAME = "revision_loop"
@@ -66,13 +81,48 @@ def verdict_passed(state):
     return should_escalate(parse_verdict(raw_verdict))
 
 
-# EscalationChecker (SDD 5.5). The last step of each loop iteration: reads the
-# verdict the Fact-Checker just wrote and escalates on a pass, which ends the
-# LoopAgent. On a fail it does nothing, so the loop runs the Synthesizer again
-# with the Fact-Checker's feedback in state, until max_iterations runs out.
+# The claims whose citations outside the question are saved without the link:
+# those the Fact-Checker marked unsupported for citing evidence Search never
+# returned. Their reason keeps the bad id.
+def unlinked_claims(verdict):
+    return [check.claim_number for check in verdict.checks
+            if check.verdict == Verdict.UNSUPPORTED and check.reason.startswith(UNKNOWN_CITATION_REASON)]
+
+
+# Saves the checked draft in state as the question's next iteration (SRS 3.5.6).
+# Skipped with no store or no question id (tests that leave Search out). Returns
+# the iteration saved, or None. A failed save is logged and the run carries on:
+# the report in state is still complete, only its record is missing.
+def save_verdicts(store, state):
+    question_id = state.get(STATE_QUESTION_ID)
+    raw_draft = state.get(STATE_DRAFT)
+    raw_verdict = state.get(STATE_VERDICT)
+    if store is None or question_id is None or raw_draft is None or raw_verdict is None:
+        return None
+    try:
+        draft = parse_draft(raw_draft)
+        verdict = parse_verdict(raw_verdict)
+        iteration = (store.latest_iteration(question_id) or 0) + 1
+        store.save_claims(question_id, iteration, draft, verdict, unlink=unlinked_claims(verdict))
+    except Exception as error:  # noqa: BLE001  the record is lost, not the report
+        logger.error("The verdicts for question %s were not saved: %s: %s",
+                     question_id, type(error).__name__, error)
+        return None
+    return iteration
+
+
+# EscalationChecker (SDD 5.5). The last step of each loop iteration: saves the
+# draft and verdict the Fact-Checker just checked, then escalates on a pass,
+# which ends the LoopAgent. On a fail it does nothing more, so the loop runs the
+# Synthesizer again with the Fact-Checker's feedback in state, until
+# max_iterations runs out. store is where the verdicts go; None saves nothing.
 class EscalationChecker(BaseAgent):
+    store: Any = None
+
     async def _run_async_impl(self, ctx):
-        passed = verdict_passed(ctx.session.state)
+        state = ctx.session.state
+        save_verdicts(self.store, state)
+        passed = verdict_passed(state)
         yield Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
@@ -81,21 +131,23 @@ class EscalationChecker(BaseAgent):
         )
 
 
-def build_escalation_checker():
-    return EscalationChecker(name=ESCALATION_CHECKER_NAME, description=ESCALATION_CHECKER_DESCRIPTION)
+def build_escalation_checker(store=None):
+    return EscalationChecker(name=ESCALATION_CHECKER_NAME, description=ESCALATION_CHECKER_DESCRIPTION,
+                             store=store)
 
 
-# Builds the revision loop: draft (or revise), check, then stop on a pass.
-# evidence_reader is passed to both agents that read passages; None means
-# each one uses EvidenceStore().read_evidence.
-def build_revision_loop(evidence_reader=None):
+# Builds the revision loop: draft (or revise), check, then save and stop on a
+# pass. evidence_reader is passed to both agents that read passages; None means
+# each one uses EvidenceStore().read_evidence. store is where the
+# EscalationChecker saves each checked draft; None saves nothing.
+def build_revision_loop(evidence_reader=None, store=None):
     return LoopAgent(
         name=LOOP_NAME,
         max_iterations=loop_max_iterations(),
         sub_agents=[
             build_synthesizer_agent(evidence_reader=evidence_reader),
             build_fact_checker_agent(evidence_reader=evidence_reader),
-            build_escalation_checker(),
+            build_escalation_checker(store=store),
         ],
     )
 
@@ -204,20 +256,24 @@ def require_search(manager):
 # Search; None means the default database and the real sources. search=False leaves Search out,
 # for tests that put search results in state themselves. With Search in, the
 # Manager gets both locks. Every agent's model is wrapped in RateLimitedGemini.
+# Verdicts are saved to Search's store, or to store when the Manager already
+# held Search; with neither, nothing is saved.
 def build_pipeline(evidence_reader=None, manager=None, search=True, store=None, fetchers=None,
                    article_fetchers=None):
     if manager is None:
         manager = build_manager_agent()
+    verdict_store = store
     if search and not has_search(manager):
         search_tool = attach_search(manager, store=store, fetchers=fetchers,
                                     article_fetchers=article_fetchers)
+        verdict_store = search_tool.store
         if evidence_reader is None:
             evidence_reader = search_tool.store.read_evidence
     if search:
         require_search(manager)
     root = SequentialAgent(
         name=PIPELINE_NAME,
-        sub_agents=[manager, build_revision_loop(evidence_reader=evidence_reader)],
+        sub_agents=[manager, build_revision_loop(evidence_reader=evidence_reader, store=verdict_store)],
     )
     return use_rate_limited_models(root)
 

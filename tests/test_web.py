@@ -76,7 +76,7 @@ def waiting_page(job):
     return web.render_job(job.snapshot())
 
 
-def test_3_8_a_new_run_shows_the_plan_stage_as_active():
+def test_3_8_3_a_new_run_shows_the_plan_stage_as_active():
     text = waiting_page(web.Job("How does attention work in a transformer?"))
     assert "Step 1 of 4" in text and "<b>Plan</b>" in text
     assert "The Manager is splitting your question into sub-questions." in text
@@ -84,7 +84,7 @@ def test_3_8_a_new_run_shows_the_plan_stage_as_active():
     assert 'http-equiv="refresh"' in text
 
 
-def test_3_8_search_progress_and_sub_questions_are_shown_escaped():
+def test_3_8_3_search_progress_and_sub_questions_are_shown_escaped():
     job = web.Job("How does attention work?")
     job.record_event("manager", search_calls=2)
     job.record_event("manager", search_results=1,
@@ -95,21 +95,21 @@ def test_3_8_search_progress_and_sub_questions_are_shown_escaped():
     assert "What is &lt;b&gt;attention&lt;/b&gt;?" in text and "<b>attention</b>" not in text
 
 
-def test_3_8_a_second_writing_round_is_named_as_a_revision():
+def test_3_8_3_a_second_writing_round_is_named_as_a_revision():
     job = web.Job("How does attention work?")
     for author in ("manager", "synthesizer", "fact_checker", "escalation_checker", "synthesizer"):
         job.record_event(author)
     assert "Round 2: the Synthesizer is revising" in waiting_page(job)
 
 
-def test_3_8_events_from_other_authors_do_not_move_the_tracker():
+def test_3_8_3_events_from_other_authors_do_not_move_the_tracker():
     job = web.Job("How does attention work?")
     job.record_event("synthesizer")
     job.record_event("revision_loop")
     assert job.snapshot()["author"] == "synthesizer"
 
 
-def test_3_8_a_gemini_retry_shows_a_notice_until_the_next_event():
+def test_3_8_3_a_gemini_retry_shows_a_notice_until_the_next_event():
     job = web.Job("How does attention work?")
     handler = web.RetryNoticeHandler(job)
     rate_logger = logging.getLogger("rate_limit")
@@ -125,12 +125,12 @@ def test_3_8_a_gemini_retry_shows_a_notice_until_the_next_event():
     assert job.snapshot()["notice"] == ""
 
 
-def test_3_8_a_retry_notice_never_carries_the_error_text():
+def test_3_8_3_a_retry_notice_never_carries_the_error_text():
     notice = web.retry_notice("Wikipedia search failed (<script>https://x.example</script>); retry 1 in 2.0s")
     assert notice == "A source (Wikipedia, arXiv or the web) is slow to answer. Search retries on its own."
 
 
-def test_3_8_sub_questions_are_read_from_a_state_change():
+def test_3_8_3_sub_questions_are_read_from_a_state_change():
     plan = {"user_question": "Q?", "sub_questions": [
         {"sub_question_id": 1, "text": "How was AlphaGo trained?", "preferred_sources": ["wikipedia"],
          "priority": 1}]}
@@ -145,7 +145,7 @@ def test_3_8_sub_questions_are_read_from_a_state_change():
 Row = namedtuple("Row", "evidence_id source_type source_title source_url published_date passage")
 
 
-def test_3_8_report_shows_stats_and_a_tag_on_every_claim():
+def test_3_8_2_report_shows_stats_and_a_tag_on_every_claim():
     draft = {"title": "Attention", "summary": "What attention does.",
              "sections": [{"heading": "Basics", "claims": [
         {"claim_number": 1, "sentence": "Transformers rely on self-attention.", "evidence_ids": [1]},
