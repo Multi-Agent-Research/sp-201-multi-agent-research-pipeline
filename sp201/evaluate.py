@@ -52,6 +52,7 @@ from evidence_store import EvidenceStore
 from manager_agent import get_model_id
 from pipeline import build_pipeline
 from rate_limit import DailyQuotaExceeded
+from rate_limit import MalformedReply
 from rate_limit import model_retry_policy
 from rate_limit import model_rpm
 from schemas import STATE_DRAFT
@@ -298,7 +299,7 @@ def explain(error):
         return cli.explain_model_error(error.code, error.message) or str(error)
     if isinstance(error, EvidenceError):
         return f"The run stopped before writing a report: {error}"
-    if isinstance(error, DailyQuotaExceeded):
+    if isinstance(error, (DailyQuotaExceeded, MalformedReply)):
         return str(error)
     return f"Unexpected error ({type(error).__name__}: {error})"
 

@@ -288,6 +288,8 @@ RETRY_PATTERN = re.compile(r"retry (\d+) of (\d+) in (\d+)")
 def retry_notice(message):
     match = RETRY_PATTERN.search(message)
     detail = f" (retry {match.group(1)} of {match.group(2)}, in {match.group(3)} s)" if match else ""
+    if "cut off or did not parse" in message:
+        return "Gemini's reply came back cut off. The pipeline asks once more on its own."
     if message.startswith("Gemini is overloaded"):
         return ("Google's Gemini servers are busy right now. "
                 f"The pipeline waits and retries on its own{detail}.")
@@ -330,6 +332,7 @@ def explain_failure(error):
     from sp201 import cli
     from google.genai import errors as genai_errors
     from rate_limit import DailyQuotaExceeded
+    from rate_limit import MalformedReply
     from synthesizer_agent import EvidenceError
 
     if isinstance(error, genai_errors.APIError):
@@ -341,7 +344,7 @@ def explain_failure(error):
         return message or str(error)
     elif isinstance(error, EvidenceError):
         return f"The run stopped before writing a report: {error}"
-    elif isinstance(error, DailyQuotaExceeded):
+    elif isinstance(error, (DailyQuotaExceeded, MalformedReply)):
         return str(error)
     logger.error("Unexpected error in a run", exc_info=error)
     return f"Unexpected error ({type(error).__name__}). The details are in the terminal running web.py."
