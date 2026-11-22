@@ -9,8 +9,16 @@ import urllib.parse
 from collections import namedtuple
 
 import pytest
+from google.genai import types
 
+import rate_limit
 import web
+from rate_limit import MalformedReply
+from test_rate_limit import CUT_OFF_JSON
+from test_rate_limit import GOOD_JSON
+from test_rate_limit import ask_for_json
+from test_rate_limit import replying_gemini
+from test_rate_limit import text_reply
 
 
 def stop_at_once(question, job):
@@ -125,6 +133,26 @@ def test_3_8_3_a_gemini_retry_shows_a_notice_until_the_next_event():
     assert job.snapshot()["notice"] == ""
 
 
+# Runs the real retry on a cut-off reply, so the warning's wording and the
+# page's notice cannot drift apart
+def test_3_8_3_a_cut_off_reply_shows_its_own_notice_not_a_slow_down(monkeypatch):
+    async def no_wait(seconds):
+        return None
+
+    monkeypatch.setattr(rate_limit.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(rate_limit, "model_limiter", lambda: rate_limit.RateLimiter(0))
+    replying_gemini(monkeypatch, [text_reply(types.Part(text=CUT_OFF_JSON)), text_reply(types.Part(text=GOOD_JSON))])
+    job = web.Job("How does attention work?")
+    handler = web.RetryNoticeHandler(job)
+    rate_logger = logging.getLogger("rate_limit")
+    rate_logger.addHandler(handler)
+    try:
+        ask_for_json(rate_limit.RateLimitedGemini(model="gemini-3.5-flash-lite"))
+    finally:
+        rate_logger.removeHandler(handler)
+    assert job.snapshot()["notice"] == "Gemini's reply came back cut off. The pipeline asks once more on its own."
+
+
 def test_3_8_3_a_retry_notice_never_carries_the_error_text():
     notice = web.retry_notice("Wikipedia search failed (<script>https://x.example</script>); retry 1 in 2.0s")
     assert notice == "A source (Wikipedia, arXiv or the web) is slow to answer. Search retries on its own."
@@ -161,3 +189,8 @@ def test_3_8_2_report_shows_stats_and_a_tag_on_every_claim():
                          ("2:22", "time taken")):
         assert f"<th>{label}</th>" in text and f"<td>{value}</td>" in text
     assert text.count("&#10003; Supported") == 2
+
+
+def test_a_reply_cut_off_twice_is_explained_in_plain_words():
+    message = web.explain_failure(MalformedReply())
+    assert message.startswith("Gemini's reply came back cut off or malformed twice")

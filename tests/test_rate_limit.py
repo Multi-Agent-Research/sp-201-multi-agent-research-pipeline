@@ -14,6 +14,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.genai import errors as genai_errors
 from google.genai import types
+from pydantic import BaseModel
 
 import rate_limit
 from rate_limit import RateLimitedGemini
@@ -172,3 +173,90 @@ def test_3_10_1_search_sources_retry_a_429_and_honor_retry_after():
                  sleep=slept.append)
     assert len(attempts) == 3
     assert slept == [7.0, 7.0]
+
+
+# ----- A JSON reply that comes back cut off or broken is asked for once more.
+# Seen live on 2026-11-22: a Synthesizer draft looped on junk characters until
+# the reply was cut off, and the JSON check failed with a stack trace -----
+
+class Reply(BaseModel):
+    answer: str
+
+
+GOOD_JSON = '{"answer": "ok"}'
+CUT_OFF_JSON = '{"answer": "o\\u0307\\u0302\\u0307\\u0302'
+
+
+def text_reply(*parts):
+    return LlmResponse(content=types.Content(role="model", parts=list(parts)))
+
+
+# Gemini's own call, replaced: sends back each reply in turn
+def replying_gemini(monkeypatch, replies):
+    calls = []
+    replies = list(replies)
+
+    async def generate(self, llm_request, stream=False):
+        calls.append(llm_request)
+        yield replies.pop(0)
+
+    monkeypatch.setattr(Gemini, "generate_content_async", generate)
+    return calls
+
+
+def ask_for_json(model, stream=False):
+    request = LlmRequest(model=model.model)
+    request.set_output_schema(Reply)
+
+    async def go():
+        return [response async for response in model.generate_content_async(request, stream)]
+    return asyncio.run(go())
+
+
+def test_a_cut_off_json_reply_is_dropped_and_asked_for_once_more(monkeypatch, waits, caplog):
+    good = text_reply(types.Part(text=GOOD_JSON))
+    calls = replying_gemini(monkeypatch, [text_reply(types.Part(text=CUT_OFF_JSON)), good])
+    with caplog.at_level(logging.WARNING, logger="rate_limit"):
+        responses = ask_for_json(RateLimitedGemini(model="gemini-3.5-flash-lite"))
+    # Only the good reply reaches the agent, so only it is counted as a model call
+    assert responses == [good]
+    assert len(calls) == 2
+    assert "cut off or did not parse; asking once more" in caplog.text
+
+
+def test_two_broken_json_replies_stop_with_a_plain_message(monkeypatch, waits):
+    calls = replying_gemini(monkeypatch, [text_reply(types.Part(text=CUT_OFF_JSON)),
+                                          text_reply(types.Part(text="not json at all")),
+                                          text_reply(types.Part(text=GOOD_JSON))])
+    with pytest.raises(rate_limit.MalformedReply, match="cut off or malformed twice, so no report was written"):
+        ask_for_json(RateLimitedGemini(model="gemini-3.5-flash-lite"))
+    assert len(calls) == 2
+
+
+def test_a_json_reply_in_a_code_fence_is_accepted_as_adk_accepts_it(monkeypatch, waits):
+    fenced = text_reply(types.Part(text="```json\n" + GOOD_JSON + "\n```"))
+    calls = replying_gemini(monkeypatch, [fenced])
+    assert ask_for_json(RateLimitedGemini(model="gemini-3.5-flash-lite")) == [fenced]
+    assert len(calls) == 1
+
+
+def test_the_models_thoughts_are_not_read_as_its_json(monkeypatch, waits):
+    reply = text_reply(types.Part(text="Let me think { about this", thought=True), types.Part(text=GOOD_JSON))
+    calls = replying_gemini(monkeypatch, [reply])
+    assert ask_for_json(RateLimitedGemini(model="gemini-3.5-flash-lite")) == [reply]
+    assert len(calls) == 1
+
+
+def test_a_plain_text_reply_is_never_checked_as_json(monkeypatch, waits):
+    reply = text_reply(types.Part(text="not json {"))
+    calls = replying_gemini(monkeypatch, [reply])
+    assert ask(RateLimitedGemini(model="gemini-3.5-flash-lite")) == [reply]
+    assert len(calls) == 1
+
+
+def test_a_streamed_json_reply_is_passed_through_unchecked(monkeypatch, waits):
+    # A streamed reply arrives in pieces, and a piece on its own is not valid JSON
+    piece = text_reply(types.Part(text=CUT_OFF_JSON))
+    calls = replying_gemini(monkeypatch, [piece])
+    assert ask_for_json(RateLimitedGemini(model="gemini-3.5-flash-lite"), stream=True) == [piece]
+    assert len(calls) == 1

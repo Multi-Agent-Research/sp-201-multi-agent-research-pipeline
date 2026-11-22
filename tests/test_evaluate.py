@@ -9,6 +9,7 @@ import pytest
 
 import pipeline
 from evidence_store import EvidenceStore
+from rate_limit import MalformedReply
 from sp201 import evaluate
 from test_pipeline import BAD_DRAFT
 from test_pipeline import FAIL
@@ -128,6 +129,10 @@ def test_3_4_3_a_fully_cited_report_has_no_uncited_claims_and_its_summary_counte
     result = run(tmp_path, [FIXED_DRAFT], [PASS])["questions"][0]
     assert result["uncited_claims"] == 0
     assert result["summary_sentences"] == 1
+
+
+def test_3_9_1_a_reply_cut_off_twice_is_recorded_in_plain_words():
+    assert evaluate.explain(MalformedReply()).startswith("Gemini's reply came back cut off or malformed twice")
 
 
 def test_3_9_1_a_question_that_stops_is_recorded_with_its_reason(tmp_path):

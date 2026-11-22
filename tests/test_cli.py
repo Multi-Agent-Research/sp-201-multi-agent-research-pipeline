@@ -15,6 +15,7 @@ from google.genai import types
 import pipeline
 from manager_agent import build_manager_agent
 from rate_limit import DailyQuotaExceeded
+from rate_limit import MalformedReply
 from schemas import STATE_DRAFT
 from schemas import STATE_PLAN
 from schemas import STATE_VERDICT
@@ -72,10 +73,13 @@ class ScriptedLlm(BaseLlm):
     reply: str = ""
     error_code: int = 0
     daily_quota_used: bool = False
+    cut_off_twice: bool = False
 
     async def generate_content_async(self, llm_request, stream=False):
         if self.daily_quota_used:
             raise DailyQuotaExceeded("Gemini free-tier daily request quota is used up (scripted)")
+        if self.cut_off_twice:
+            raise MalformedReply()
         if self.error_code:
             status = {429: "RESOURCE_EXHAUSTED", 404: "NOT_FOUND", 503: "UNAVAILABLE"}[self.error_code]
             error_class = genai_errors.ServerError if self.error_code >= 500 else genai_errors.ClientError
@@ -174,6 +178,18 @@ def test_a_used_up_daily_quota_prints_a_plain_message(monkeypatch, capsys):
     assert stopped.value.code == 1
     captured = capsys.readouterr()
     assert "daily request quota is used up" in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_a_reply_cut_off_twice_prints_a_plain_message(monkeypatch, capsys):
+    agent = manager_with(ScriptedLlm(model="scripted", cut_off_twice=True))
+    monkeypatch.setattr(cli, "build_root_agent", lambda: agent)
+    with pytest.raises(SystemExit) as stopped:
+        cli.main([QUESTION])
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert "Gemini's reply came back cut off or malformed twice, so no report was written." in captured.out
+    assert "Model calls: 1" in captured.out
     assert "Traceback" not in captured.err
 
 
