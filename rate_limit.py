@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import os
 import random
 import re
 import threading
 import time
+from contextlib import aclosing
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
  
@@ -47,6 +49,14 @@ class RetriesExhausted(Exception):
  
 class DailyQuotaExceeded(RuntimeError):
     """The free tier's requests-per-day quota is used up. Retrying will not help."""
+ 
+ 
+class MalformedReply(RuntimeError):
+    """Gemini was asked for JSON and twice sent back a reply that was cut off or did not parse."""
+ 
+    def __init__(self, message=("Gemini's reply came back cut off or malformed twice, so no report "
+                                "was written. Try the question again.")):
+        super().__init__(message)
  
  
 # --------------------------------------------------------------------------
@@ -243,25 +253,70 @@ def is_retryable_model_error(error):
     return isinstance(error, genai_errors.APIError) and error.code in RETRYABLE_STATUS_CODES
  
  
+def asks_for_json(llm_request):
+    """True when the request set a response schema, which ADK does for an agent with an output_schema."""
+    config = llm_request.config
+    return config is not None and (config.response_schema is not None
+                                   or config.response_mime_type == "application/json")
+ 
+ 
+def is_unreadable_json(response):
+    """True when a reply's text (its thoughts left out) is not JSON, even with a code fence taken off.
+ 
+    The fence is taken off the same way ADK does before it checks the schema,
+    so nothing ADK would accept is thrown away here. A reply with no text,
+    such as a tool call, is left alone.
+    """
+    content = response.content
+    if content is None or not content.parts:
+        return False
+    text = "".join(part.text for part in content.parts if part.text and not part.thought)
+    if not text.strip():
+        return False
+    fenced = re.fullmatch(r"```\w*\s*(.*?)\s*```", text.strip(), re.DOTALL)
+    try:
+        json.loads(fenced.group(1) if fenced else text)
+    except ValueError:
+        return True
+    return False
+ 
+ 
 class RateLimitedGemini(Gemini):
-    """Gemini with request spacing and 429/5xx backoff.
+    """Gemini with request spacing, 429/5xx backoff, and one more try for broken JSON.
  
     Retries only when the failed attempt yielded nothing, so a caller never
     sees part of one response followed by another. Retries are logged, not
     counted in model_call_count, which counts responses the agents received.
+ 
+    When a request asks for JSON and the reply is cut off or does not parse,
+    the reply is dropped and the request sent once more; a second broken reply
+    raises MalformedReply. A streamed reply arrives in pieces, so it is not checked.
     """
  
     async def generate_content_async(self, llm_request, stream=False):
         policy = model_retry_policy()
+        check_json = not stream and asks_for_json(llm_request)
         attempt = 1
+        broken_replies = 0
         while True:
             await model_limiter().wait_async()
             yielded = False
+            broken = False
             try:
-                async for response in super().generate_content_async(llm_request, stream):
-                    yielded = True
-                    yield response
-                return
+                async with aclosing(super().generate_content_async(llm_request, stream)) as responses:
+                    async for response in responses:
+                        if check_json and is_unreadable_json(response):
+                            broken = True
+                            break
+                        yielded = True
+                        yield response
+                if not broken:
+                    return
+                broken_replies += 1
+                if broken_replies > 1:
+                    raise MalformedReply()
+                logger.warning("Gemini %s sent back JSON that was cut off or did not parse; asking once more",
+                               llm_request.model)
             except genai_errors.APIError as error:
                 if yielded or not is_retryable_model_error(error):
                     raise
