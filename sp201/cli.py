@@ -25,6 +25,7 @@ from evidence_store import EvidenceStore
 from manager_agent import get_model_id
 from pipeline import build_pipeline
 from rate_limit import DailyQuotaExceeded
+from rate_limit import MalformedReply
 from schemas import STATE_DRAFT
 from schemas import STATE_PLAN
 from schemas import STATE_USER_QUESTION
@@ -241,7 +242,8 @@ def main(argv=None):
     except EvidenceError as error:
         # Search found nothing to cite, so no report can be written
         stop(f"The run stopped before writing a report: {error}", counter)
-    except DailyQuotaExceeded as error:
+    except (DailyQuotaExceeded, MalformedReply) as error:
+        # Both carry their own plain message
         stop(str(error), counter)
     print("")
     print(render(state, counter.calls))
